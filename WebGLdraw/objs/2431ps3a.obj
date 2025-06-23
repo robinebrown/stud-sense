@@ -1,0 +1,19 @@
+# LDraw .dat to OBJ
+
+# vertices:
+
+# mesh 6887549
+v 0.6 0 0.4125
+v 0.8 0 0.3125
+v 0.6 0 0.3125
+v 0.6 0 -0.4125
+v 0.6 0 -0.3125
+v 0.8 0 -0.3125
+
+# faces:
+g mesh6887549
+usemtl color16
+s 1
+
+f 1 3 2
+f 4 6 5
