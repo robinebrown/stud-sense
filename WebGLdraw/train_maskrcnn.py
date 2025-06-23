@@ -1,4 +1,9 @@
 # train_maskrcnn.py
+
+import multiprocessing as mp
+# Use 'spawn' to avoid CUDA re-init errors in forked workers
+mp.set_start_method('spawn', force=True)
+
 import os
 import argparse
 import torch
@@ -32,14 +37,14 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
     if smoke_test:
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
 
-    # 2) Multi-view
+    # 2) Multi-view wrapper
     if views_per_obj > 1:
         dataset = MultiViewDataset(ds, views_per_obj)
         print(f"→ Multi-view: {views_per_obj} views per mesh, dataset size {len(dataset)}")
     else:
         dataset = ds
 
-    # 3) DataLoader: high parallelism
+    # 3) High-parallel DataLoader
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
