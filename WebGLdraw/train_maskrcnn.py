@@ -1,6 +1,8 @@
+# train_maskrcnn.py
+import os
 import argparse
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
@@ -13,65 +15,78 @@ class MultiViewDataset:
     def __len__(self):
         return len(self.base) * self.views
     def __getitem__(self, idx):
-        obj_idx = idx % len(self.base)
-        return self.base[obj_idx]
+        return self.base[idx % len(self.base)]
 
 def collate_fn(batch):
     images, targets = zip(*batch)
     return list(images), list(targets)
 
 def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
-    # 1) Load dataset
+    # 1) Load dataset (on GPU)
+    ds = SyntheticBrickDataset(
+        obj_dir=obj_dir,
+        image_size=256,
+        max_meshes=200 if smoke_test else None,
+        device=device
+    )
     if smoke_test:
-        ds = SyntheticBrickDataset(obj_dir=obj_dir, image_size=256, max_meshes=200)
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
-    else:
-        ds = SyntheticBrickDataset(obj_dir=obj_dir, image_size=256)
-    # 2) Multi-view wrapper
+
+    # 2) Multi-view
     if views_per_obj > 1:
         dataset = MultiViewDataset(ds, views_per_obj)
         print(f"→ Multi-view: {views_per_obj} views per mesh, dataset size {len(dataset)}")
     else:
         dataset = ds
-    # 3) DataLoader with multiprocessing and pin_memory
+
+    # 3) DataLoader: high parallelism
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=min(32, os.cpu_count()),
         pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True
     )
-    num_classes = len(ds) + 1  # +1 for background
+
+    # 4) Model & optimizer
+    num_classes = len(ds) + 1  # +1 background
     model = maskrcnn_resnet50_fpn(num_classes=num_classes)
     model.to(device).train()
     optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad], lr=lr
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr
     )
-    for epoch in range(1, epochs+1):
+
+    # 5) Training loop
+    for epoch in range(1, epochs + 1):
         running_loss = 0.0
         print(f"\nEpoch {epoch}/{epochs}")
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
-            # Move batch to device here!
             images = [img.to(device) for img in images]
             moved_targets = []
             for t in targets:
-                t2 = {}
-                for k, v in t.items():
-                    t2[k] = v.to(device) if isinstance(v, torch.Tensor) else v
+                t2 = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                      for k, v in t.items()}
                 moved_targets.append(t2)
+
             loss_dict = model(images, moved_targets)
             losses = sum(loss for loss in loss_dict.values())
+
             optimizer.zero_grad()
             losses.backward()
             optimizer.step()
+
             running_loss += losses.item()
-            if (i % 50 == 0):
+            if i % 50 == 0:
                 print(f"  Batch {i}/{len(loader)}  Loss: {losses.item():.4f}")
+
         avg_loss = running_loss / len(loader)
         print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), f"maskrcnn_epoch{epoch}.pth")
+
     torch.save(model.state_dict(), "maskrcnn_final.pth")
     print("Training complete! Model saved to maskrcnn_final.pth")
 
@@ -86,14 +101,19 @@ if __name__ == "__main__":
     parser.add_argument("--views_per_obj", type=int, default=1,
                         help="Number of random views per mesh per epoch")
     args = parser.parse_args()
+
     # Device auto-selection
     if args.device:
         device = torch.device(args.device)
     else:
-        if torch.cuda.is_available(): device = torch.device("cuda")
-        elif torch.backends.mps.is_available(): device = torch.device("mps")
-        else: device = torch.device("cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
     print("Training on device:", device)
+
     train(
         obj_dir=args.obj_dir,
         epochs=args.epochs,
