@@ -58,8 +58,7 @@ class SyntheticBrickDataset(Dataset):
         self.renderer = MeshRenderer(
             rasterizer=MeshRasterizer(
                 cameras=cameras,
-                raster_settings=raster_settings,
-                device=self.device
+                raster_settings=raster_settings
             ),
             shader=SoftPhongShader(
                 device=self.device,
