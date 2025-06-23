@@ -1,11 +1,18 @@
 # synthetic_bricks.py
-import os, random, torch
+
+import os
+import random
+import torch
 from torch.utils.data import Dataset
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.renderer import (
-    FoVPerspectiveCameras, RasterizationSettings,
-    MeshRenderer, MeshRasterizer, SoftPhongShader,
-    PointLights, TexturesVertex
+    FoVPerspectiveCameras,
+    RasterizationSettings,
+    MeshRenderer,
+    MeshRasterizer,
+    SoftPhongShader,
+    PointLights,
+    TexturesVertex
 )
 
 def random_spherical_pose(device):
@@ -23,9 +30,11 @@ class SyntheticBrickDataset(Dataset):
         self.device = torch.device(device)
 
         # Gather .obj file paths
-        all_paths = [os.path.join(obj_dir, f)
-                     for f in os.listdir(obj_dir)
-                     if f.lower().endswith('.obj')]
+        all_paths = [
+            os.path.join(obj_dir, f)
+            for f in os.listdir(obj_dir)
+            if f.lower().endswith('.obj')
+        ]
         if max_meshes is not None:
             all_paths = all_paths[:max_meshes]
         print(f"→ Found {len(all_paths)} .obj files in {obj_dir}")
@@ -35,14 +44,16 @@ class SyntheticBrickDataset(Dataset):
         verts_list = meshes.verts_list()
         valid_idx = [i for i, v in enumerate(verts_list) if v.shape[0] > 0]
         if len(valid_idx) < len(verts_list):
-            print(f"   · filtered out {len(verts_list)-len(valid_idx)} empty meshes")
+            print(f"   · filtered out {len(verts_list) - len(valid_idx)} empty meshes")
         self.meshes = meshes[valid_idx]
         self.obj_paths = [all_paths[i] for i in valid_idx]
 
         # White vertex textures
         verts_list = self.meshes.verts_list()
-        verts_features = [torch.ones((v.shape[0], 3), device=self.device)
-                          for v in verts_list]
+        verts_features = [
+            torch.ones((v.shape[0], 3), device=self.device)
+            for v in verts_list
+        ]
         self.meshes.textures = TexturesVertex(verts_features=verts_features)
 
         # GPU-side renderer
@@ -67,6 +78,9 @@ class SyntheticBrickDataset(Dataset):
             )
         )
 
+        # Move the renderer (rasterizer + shader) onto the GPU
+        self.renderer = self.renderer.to(self.device)
+
         self.max_tries = max_tries
 
     def __len__(self):
@@ -74,7 +88,8 @@ class SyntheticBrickDataset(Dataset):
 
     def __getitem__(self, idx):
         mesh = self.meshes[idx]
-        # random-view until visible
+
+        # Try random views until at least one pixel of the mesh is visible
         for _ in range(self.max_tries):
             R, T = random_spherical_pose(self.device)
             rgb = self.renderer(mesh, R=R, T=T)[0, ..., :3]
@@ -83,13 +98,14 @@ class SyntheticBrickDataset(Dataset):
             if mask.any():
                 break
         else:
+            # fallback view if nothing visible
             R = torch.eye(3, device=self.device).unsqueeze(0)
             T = torch.tensor([[0, 0, 3]], device=self.device, dtype=torch.float32)
             rgb = self.renderer(mesh, R=R, T=T)[0, ..., :3]
             frags = self.renderer.rasterizer(mesh, R=R, T=T)
             mask = frags.pix_to_face[..., 0] >= 0
 
-        # prepare output
+        # Prepare image and mask
         image = rgb.permute(2, 0, 1)
         mask = mask.squeeze(0).to(torch.uint8)
         ys, xs = torch.nonzero(mask, as_tuple=True)
@@ -100,6 +116,8 @@ class SyntheticBrickDataset(Dataset):
             xmin, xmax = xs.min(), xs.max()
             xmax = max(xmax, xmin + 1)
             ymax = max(ymax, ymin + 1)
+
+        # Build target dict
         box = torch.tensor([[xmin, ymin, xmax, ymax]], dtype=torch.float32, device=self.device)
         target = {
             "boxes":    box,
@@ -109,4 +127,5 @@ class SyntheticBrickDataset(Dataset):
             "area":     (xmax - xmin) * (ymax - ymin),
             "iscrowd":  torch.zeros(1, dtype=torch.int64, device=self.device)
         }
+
         return image, target
