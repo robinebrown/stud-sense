@@ -1,9 +1,13 @@
 import os, glob, torch
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Subset
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
 
+# ─── force spawn when using cuda ────────────────────────────────────────────────
+if torch.cuda.is_available():
+    mp.set_start_method('spawn', force=True)
 class MultiViewDataset:
     """Repeats each object multiple times for multiple random views."""
     def __init__(self, base_ds, views_per_obj=1):
