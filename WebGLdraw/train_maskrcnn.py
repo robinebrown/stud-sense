@@ -59,7 +59,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,       # ← single-process
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=collate_fn
     )
 
