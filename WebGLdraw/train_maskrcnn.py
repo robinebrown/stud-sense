@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast
+from torch.amp import GradScaler
 
 class MultiViewDataset:
     """Repeats each object multiple times to get multiple views per epoch."""
@@ -65,7 +66,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         [p for p in model.parameters() if p.requires_grad],
         lr=lr
     )
-    scaler = GradScaler()
+    scaler = GradScaler(device_type=device.type)
 
     # 5) Training loop with mixed precision
     for epoch in range(1, epochs + 1):
