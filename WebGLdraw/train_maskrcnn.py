@@ -1,7 +1,7 @@
 # train_maskrcnn.py
 
 import multiprocessing as mp
-# Use 'spawn' to avoid CUDA re-init errors in forked workers
+# Use 'spawn' to avoid CUDA re-init errors in forked DataLoader workers
 mp.set_start_method('spawn', force=True)
 
 import os
@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
 
 class MultiViewDataset:
     """Repeats each object multiple times to get multiple views per epoch."""
@@ -50,13 +51,13 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=min(32, os.cpu_count()),
-        pin_memory=False,           # disable pinning for CUDA tensors
+        num_workers=16,           # you can adjust down from 32 to reduce startup time
+        pin_memory=False,         # dataset yields CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
     )
 
-    # 4) Model & optimizer
+    # 4) Model, optimizer, and AMP scaler
     num_classes = len(ds) + 1  # +1 background
     model = maskrcnn_resnet50_fpn(num_classes=num_classes)
     model.to(device).train()
@@ -64,12 +65,14 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         [p for p in model.parameters() if p.requires_grad],
         lr=lr
     )
+    scaler = GradScaler()
 
-    # 5) Training loop
+    # 5) Training loop with mixed precision
     for epoch in range(1, epochs + 1):
         running_loss = 0.0
         print(f"\nEpoch {epoch}/{epochs}")
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
+            # move inputs
             images = [img.to(device) for img in images]
             moved_targets = []
             for t in targets:
@@ -77,12 +80,15 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
                       for k, v in t.items()}
                 moved_targets.append(t2)
 
-            loss_dict = model(images, moved_targets)
-            losses = sum(loss for loss in loss_dict.values())
+            # forward + backward under autocast
+            with autocast():
+                loss_dict = model(images, moved_targets)
+                losses = sum(loss for loss in loss_dict.values())
 
             optimizer.zero_grad()
-            losses.backward()
-            optimizer.step()
+            scaler.scale(losses).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += losses.item()
             if i % 50 == 0:
@@ -98,12 +104,12 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--obj_dir",    default="objs",       help="Folder with .obj meshes")
-    parser.add_argument("--epochs",     type=int,   default=10)
-    parser.add_argument("--batch_size", type=int,   default=2)
+    parser.add_argument("--epochs",     type=int,   default=30)
+    parser.add_argument("--batch_size", type=int,   default=10)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--device",     default=None, help="cuda, mps, or cpu")
     parser.add_argument("--smoke_test", action="store_true", help="Use small subset for testing")
-    parser.add_argument("--views_per_obj", type=int, default=1,
+    parser.add_argument("--views_per_obj", type=int, default=10,
                         help="Number of random views per mesh per epoch")
     args = parser.parse_args()
 
