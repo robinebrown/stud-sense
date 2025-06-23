@@ -1,8 +1,8 @@
 # synthetic_bricks.py
 
 import os
-import torch
 import random
+import torch
 from torch.utils.data import Dataset
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.renderer import (
@@ -104,14 +104,14 @@ class SyntheticBrickDataset(Dataset):
 
         # prepare tensors with batch dim for Kornia
         image = rgb.permute(2, 0, 1).unsqueeze(0)       # (1,3,H,W)
-        mask  = mask.to(torch.float32).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+        mask  = mask.to(torch.float32).unsqueeze(1)     # (1,1,H,W)
 
         # apply GPU augmentations
         image_aug, mask_aug = self.augment(image, mask)
 
-        # threshold mask back to binary and squeeze batch channel
-        mask_aug = (mask_aug > 0.5).to(torch.uint8).squeeze(0).squeeze(0)
-        image = image_aug.squeeze(0)
+        # threshold mask back to binary and remove batch/channel dims
+        mask_aug = (mask_aug > 0.5).to(torch.uint8).squeeze(0).squeeze(0)  # [H,W]
+        image = image_aug.squeeze(0)                                     # [3,H,W]
 
         # compute bounding box from mask
         ys, xs = torch.nonzero(mask_aug, as_tuple=True)
