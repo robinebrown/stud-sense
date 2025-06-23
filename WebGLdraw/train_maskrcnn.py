@@ -52,7 +52,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=16,           # you can adjust down from 32 to reduce startup time
+        num_workers=16,           # adjust as needed
         pin_memory=False,         # dataset yields CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
@@ -66,7 +66,8 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         [p for p in model.parameters() if p.requires_grad],
         lr=lr
     )
-    scaler = GradScaler(device_type=device.type)
+    # Pass device.type as the first (positional) argument
+    scaler = GradScaler(device.type)
 
     # 5) Training loop with mixed precision
     for epoch in range(1, epochs + 1):
