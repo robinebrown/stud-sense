@@ -51,7 +51,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=min(32, os.cpu_count()),
-        pin_memory=True,
+        pin_memory=False,           # disable pinning for CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
     )
