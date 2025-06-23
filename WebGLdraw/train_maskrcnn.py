@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torch.amp import GradScaler
 
 class MultiViewDataset:
@@ -83,7 +83,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
                 moved_targets.append(t2)
 
             # forward + backward under autocast
-            with autocast():
+            with autocast(device_type='cuda'):
                 loss_dict = model(images, moved_targets)
                 losses = sum(loss for loss in loss_dict.values())
 
