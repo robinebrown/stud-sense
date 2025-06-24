@@ -1,7 +1,7 @@
 # train_maskrcnn.py
 
 import torch.multiprocessing as mp
-# Enforce spawn start method for worker processes (safer on Linux/macOS)
+# Enforce spawn start method for worker processes
 mp.set_start_method('spawn', force=True)
 
 import argparse
@@ -72,13 +72,13 @@ def train(args):
     ds = MultiViewDataset(base_ds, views)
     print(f"Dataset size: {len(ds)} samples ({len(base_ds)} meshes × {views} views)")
 
-    # DataLoader with pin_memory, persistent_workers, prefetch
+    # DataLoader (disable pin_memory because dataset returns CUDA tensors)
     loader = DataLoader(
         ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=False,
         persistent_workers=True,
         prefetch_factor=2,
         collate_fn=collate_fn
@@ -86,7 +86,7 @@ def train(args):
 
     # Build Mask R-CNN
     num_classes = len(base_ds) + 1  # class 0 = background
-    model = maskrcnn_resnet50_fpn(weights=None,     num_classes=num_classes)
+    model = maskrcnn_resnet50_fpn(weights=None, num_classes=num_classes)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -103,7 +103,7 @@ def train(args):
             targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()}
                        for t in targets]
 
-            with torch.cuda.amp.autocast(device_type='cuda'):
+            with torch.cuda.amp.autocast():
                 loss_dict = model(images, targets)
                 loss = sum(loss for loss in loss_dict.values())
 
