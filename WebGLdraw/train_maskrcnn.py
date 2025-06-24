@@ -7,9 +7,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision.models.detection import maskrcnn_resnet50_fpn
-from torchvision.transforms import functional as F
 from synthetic_bricks import SyntheticBrickDataset
-import utils  # assumes you have a collate_fn defined here
 
 class MultiViewDataset(Dataset):
     """
@@ -23,8 +21,11 @@ class MultiViewDataset(Dataset):
         return len(self.base) * self.views
 
     def __getitem__(self, idx):
-        # modulo ensures each mesh appears views_per_obj times
         return self.base[idx % len(self.base)]
+
+
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
 
 def parse_args():
@@ -46,7 +47,6 @@ def parse_args():
 def train(args):
     device = torch.device(args.device)
 
-    # prepare dataset
     if args.smoke_test:
         print("→ [Smoke-test] using first 200 meshes")
         base_ds = SyntheticBrickDataset(
@@ -69,7 +69,6 @@ def train(args):
     ds = MultiViewDataset(base_ds, views)
     print(f"Dataset size: {len(ds)} samples ({len(base_ds)} meshes × {views} views)")
 
-    # DataLoader with spawn context
     ctx = mp.get_context('spawn')
     loader = DataLoader(
         ds,
@@ -77,11 +76,10 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=utils.collate_fn,
+        collate_fn=collate_fn,
         mp_context=ctx
     )
 
-    # build Mask R-CNN model
     num_classes = len(base_ds) + 1  # class 0 = background
     model = maskrcnn_resnet50_fpn(pretrained=False, num_classes=num_classes)
     model.to(device)
@@ -89,17 +87,14 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler(device_type='cuda')
 
-    # training loop
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
 
         for i, (images, targets) in enumerate(loader, 1):
-            # move to device
             images = list(img.to(device) for img in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            # forward + backward with amp
             with torch.cuda.amp.autocast(device_type='cuda'):
                 loss_dict = model(images, targets)
                 loss = sum(loss for loss in loss_dict.values())
@@ -116,7 +111,6 @@ def train(args):
                 running_loss = 0.0
 
         print(f"Epoch {epoch}/{epochs} completed.")
-        # save checkpoint per epoch
         torch.save(model.state_dict(), f"maskrcnn_epoch_{epoch}.pth")
 
     print("Training complete! Model saved to maskrcnn_final.pth")
