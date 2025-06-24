@@ -100,7 +100,7 @@ class SyntheticBrickDataset(Dataset):
         # 1) Select the mesh and optionally apply color variation
         mesh = self.meshes[idx]
         # 20% chance to tint the piece randomly
-        if random.random() < 0.75:
+        if random.random() < 0.45:
             h = random.random()
             s = random.uniform(0.5, 1.0)
             v = random.uniform(0.6, 1.0)
