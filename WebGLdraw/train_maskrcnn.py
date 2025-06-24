@@ -4,6 +4,8 @@ mp.set_start_method('spawn', force=True)
 import argparse
 import os
 import torch
+# Enable CuDNN benchmark for fixed-size inputs
+torch.backends.cudnn.benchmark = True
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 from torchvision.models.detection import maskrcnn_resnet50_fpn
@@ -21,6 +23,7 @@ class MultiViewDataset(Dataset):
         return len(self.base) * self.views
 
     def __getitem__(self, idx):
+        # modulo ensures each mesh appears views_per_obj times
         return self.base[idx % len(self.base)]
 
 
@@ -47,6 +50,7 @@ def parse_args():
 def train(args):
     device = torch.device(args.device)
 
+    # Prepare base dataset
     if args.smoke_test:
         print("→ [Smoke-test] using first 200 meshes")
         base_ds = SyntheticBrickDataset(
@@ -69,6 +73,7 @@ def train(args):
     ds = MultiViewDataset(base_ds, views)
     print(f"Dataset size: {len(ds)} samples ({len(base_ds)} meshes × {views} views)")
 
+    # DataLoader with spawn context, pin_memory, and prefetch
     ctx = mp.get_context('spawn')
     loader = DataLoader(
         ds,
@@ -76,10 +81,13 @@ def train(args):
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
         collate_fn=collate_fn,
         mp_context=ctx
     )
 
+    # Build Mask R-CNN
     num_classes = len(base_ds) + 1  # class 0 = background
     model = maskrcnn_resnet50_fpn(pretrained=False, num_classes=num_classes)
     model.to(device)
@@ -87,13 +95,15 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler(device_type='cuda')
 
+    # Training loop
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
 
         for i, (images, targets) in enumerate(loader, 1):
-            images = list(img.to(device) for img in images)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            # Move to device with non_blocking transfers
+            images = [img.to(device, non_blocking=True) for img in images]
+            targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()} for t in targets]
 
             with torch.cuda.amp.autocast(device_type='cuda'):
                 loss_dict = model(images, targets)
