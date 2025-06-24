@@ -11,7 +11,6 @@ import torch
 torch.backends.cudnn.benchmark = True
 
 from torch.utils.data import DataLoader, Dataset
-import torchvision
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 
@@ -27,7 +26,6 @@ class MultiViewDataset(Dataset):
         return len(self.base) * self.views
 
     def __getitem__(self, idx):
-        # modulo ensures each mesh appears views_per_obj times
         return self.base[idx % len(self.base)]
 
 def collate_fn(batch):
@@ -51,7 +49,7 @@ def parse_args():
 def train(args):
     device = torch.device(args.device)
 
-    # Prepare base dataset
+    # --- Dataset setup ---
     if args.smoke_test:
         print("→ [Smoke-test] using first 200 meshes")
         base_ds = SyntheticBrickDataset(
@@ -72,7 +70,7 @@ def train(args):
     ds = MultiViewDataset(base_ds, views)
     print(f"Dataset size: {len(ds)} samples ({len(base_ds)} meshes × {views} views)")
 
-    # DataLoader (disable pin_memory because dataset returns CUDA tensors)
+    # --- DataLoader (pin_memory disabled because dataset yields CUDA tensors) ---
     loader = DataLoader(
         ds,
         batch_size=args.batch_size,
@@ -84,24 +82,31 @@ def train(args):
         collate_fn=collate_fn
     )
 
-    # Build Mask R-CNN
-    num_classes = len(base_ds) + 1  # class 0 = background
+    # --- Model & optimizer ---
+    num_classes = len(base_ds) + 1  # background + each mesh as its own class
     model = maskrcnn_resnet50_fpn(weights=None, num_classes=num_classes)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler()
 
-    # Training loop
+    # --- Training loop ---
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
 
-        for i, (images, targets) in enumerate(loader, 1):
-            # non-blocking transfers
+        for i, (images, targets_raw) in enumerate(loader, 1):
+            # Move only tensor fields to device
             images = [img.to(device, non_blocking=True) for img in images]
-            targets = [{k: v.to(device, non_blocking=True) for k, v in t.items()}
-                       for t in targets]
+            targets = []
+            for t in targets_raw:
+                t2 = {}
+                for k, v in t.items():
+                    if isinstance(v, torch.Tensor):
+                        t2[k] = v.to(device, non_blocking=True)
+                    else:
+                        t2[k] = v
+                targets.append(t2)
 
             with torch.cuda.amp.autocast():
                 loss_dict = model(images, targets)
