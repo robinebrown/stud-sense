@@ -86,11 +86,11 @@ def train(args):
 
     # Build Mask R-CNN
     num_classes = len(base_ds) + 1  # class 0 = background
-    model = maskrcnn_resnet50_fpn(pretrained=False, num_classes=num_classes)
+    model = maskrcnn_resnet50_fpn(weights=None,     num_classes=num_classes)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scaler = torch.cuda.amp.GradScaler(device_type='cuda')
+    scaler = torch.cuda.amp.GradScaler()
 
     # Training loop
     for epoch in range(1, epochs + 1):
