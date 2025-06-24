@@ -52,7 +52,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=0,           # adjust as needed
-        pin_memory=False,         # dataset yields CUDA tensors
+        pin_memory=True,         # dataset yields CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
     )
