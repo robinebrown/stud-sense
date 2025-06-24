@@ -1,6 +1,7 @@
 import os
 import math
 import random
+import colorsys
 import torch
 from torch.utils.data import Dataset
 from pytorch3d.io import load_objs_as_meshes
@@ -18,9 +19,9 @@ from torchvision.transforms import functional as F
 
 class SyntheticBrickDataset(Dataset):
     """
-    Grayscale renders with headlight illumination for consistent 3D shading:
-      - White piece, black background
-      - Directional light aligned with camera view (headlight)
+    Grayscale renders with optional color variation for robustness:
+      - White or randomly colored piece on a black background
+      - Headlight directional illumination aligned with camera
       - Random camera azimuth [0–360°], elevation [15–75°]
       - Crop to object, pad to square, resize without distortion
       - Mild contrast boost + slight 2D rotations/flips
@@ -64,15 +65,14 @@ class SyntheticBrickDataset(Dataset):
         self.radii = []
         for verts in self.meshes.verts_list():
             center = verts.mean(0, keepdim=True)
-            radius = (verts - center).norm(dim=1).max().item()
-            self.radii.append(radius)
+            self.radii.append((verts - center).norm(dim=1).max().item())
 
-        # 4) Assign white textures
+        # 4) Assign initial white textures
         feats = [torch.ones((v.shape[0], 3), device=self.device)
                  for v in self.meshes.verts_list()]
         self.meshes.textures = TexturesVertex(verts_features=feats)
 
-        # 5) Renderer placeholder
+        # 5) Renderer placeholder setup
         base_cam = FoVPerspectiveCameras(device=self.device, fov=self.fov)
         rast_settings = RasterizationSettings(
             image_size=self.render_size,
@@ -83,10 +83,10 @@ class SyntheticBrickDataset(Dataset):
         )
         default_lights = DirectionalLights(
             device=self.device,
-            direction=[[0.0, 0.0, -1.0]],  # will override per sample
-            ambient_color=[[0.05, 0.05, 0.05]],
-            diffuse_color=[[1.0, 1.0, 1.0]],
-            specular_color=[[0.5, 0.5, 0.5]]
+            direction=[[0.0, 0.0, -1.0]],  # headlight direction override per sample
+            ambient_color=[[0.1, 0.1, 0.1]],
+            diffuse_color=[[0.8, 0.8, 0.8]],
+            specular_color=[[0.3, 0.3, 0.3]]
         )
         self.renderer = MeshRenderer(
             rasterizer=MeshRasterizer(cameras=base_cam, raster_settings=rast_settings),
@@ -97,12 +97,23 @@ class SyntheticBrickDataset(Dataset):
         return len(self.meshes)
 
     def __getitem__(self, idx):
+        # 1) Select the mesh and optionally apply color variation
         mesh = self.meshes[idx]
-        radius = self.radii[idx]
+        # 20% chance to tint the piece randomly
+        if random.random() < 0.75:
+            h = random.random()
+            s = random.uniform(0.5, 1.0)
+            v = random.uniform(0.6, 1.0)
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            verts = mesh.verts_list()[0]
+            color_feat = torch.tensor([r, g, b], device=self.device, dtype=torch.float32)
+            feats = color_feat.unsqueeze(0).repeat(verts.shape[0], 1)
+            mesh.textures = TexturesVertex(verts_features=[feats])
 
-        # 1) Random camera pose
+        # 2) Sample random camera pose
+        radius = self.radii[idx]
         azim = random.uniform(0, 360)
-        elev = random.uniform(-75, 75)  # allow views from underside, sides, and top
+        elev = random.uniform(15, 75)
         half_fov = math.radians(self.fov / 2)
         dist = (radius * self.camera_scale) / math.tan(half_fov)
         R, T = look_at_view_transform(dist, elev, azim, device=self.device)
@@ -110,12 +121,9 @@ class SyntheticBrickDataset(Dataset):
         self.renderer.rasterizer.cameras = cam
         self.renderer.shader.cameras    = cam
 
-        # 2) Headlight: light direction aligned with camera view
-        # Compute camera-to-world rotation
-        cam_to_world = R[0].T  # (3,3)
-        # In camera coords, headlight comes along -Z
-        dir_cam = torch.tensor([0.0, 0.0, -1.0], device=self.device).view(1,3)
-        # Transform to world coords
+        # 3) Headlight: align directional light with camera forward vector
+        cam_to_world = R[0].T  # invert rotation
+        dir_cam = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=torch.float32).view(1, 3)
         dir_world = (dir_cam @ cam_to_world).cpu().tolist()
         lights = DirectionalLights(
             device=self.device,
@@ -126,19 +134,19 @@ class SyntheticBrickDataset(Dataset):
         )
         self.renderer.shader.lights = lights
 
-        # 3) Render
+        # 4) Render RGB + mask
         out = self.renderer(mesh, R=R, T=T)
-        rgb  = out[0, ..., :3]
+        rgb = out[0, ..., :3]
         frags = self.renderer.rasterizer(mesh, R=R, T=T)
         mask = (frags.pix_to_face[..., 0] >= 0).squeeze(0)
 
-        # 4) Convert to tensors
-        image = rgb.permute(2, 0, 1)      # (3, H, W)
-        mask_t = mask.to(torch.uint8)    # (H, W)
+        # 5) Convert to tensors
+        image = rgb.permute(2, 0, 1)    # (3, H, W)
+        mask = mask.to(torch.uint8)     # (H, W)
 
-        # 5) Crop & pad to square
-        H, W = mask_t.shape
-        ys, xs = torch.nonzero(mask_t, as_tuple=True)
+        # 6) Crop & pad to square
+        H, W = mask.shape
+        ys, xs = torch.nonzero(mask, as_tuple=True)
         if ys.numel():
             m = 16
             y0 = max(0, ys.min().item() - m)
@@ -148,7 +156,7 @@ class SyntheticBrickDataset(Dataset):
         else:
             y0, y1, x0, x1 = 0, 1, 0, 1
         crop_img = F.crop(image, y0, x0, y1 - y0, x1 - x0)
-        crop_mask = F.crop(mask_t.unsqueeze(0), y0, x0, y1 - y0, x1 - x0).squeeze(0)
+        crop_mask = F.crop(mask.unsqueeze(0), y0, x0, y1 - y0, x1 - x0).squeeze(0)
         ch, cw = crop_img.shape[1:]
         if ch > cw:
             diff = ch - cw
@@ -159,25 +167,26 @@ class SyntheticBrickDataset(Dataset):
         crop_img = F.pad(crop_img, pad, fill=0)
         crop_mask = F.pad(crop_mask.unsqueeze(0), pad, fill=0).squeeze(0)
         image = F.resize(crop_img, [self.image_size, self.image_size], interpolation=F.InterpolationMode.BILINEAR)
-        mask  = F.resize(crop_mask.unsqueeze(0).float(), [self.image_size, self.image_size], interpolation=F.InterpolationMode.NEAREST)[0].to(torch.uint8)
+        mask = F.resize(crop_mask.unsqueeze(0).float(), [self.image_size, self.image_size], interpolation=F.InterpolationMode.NEAREST)[0].to(torch.uint8)
 
-        # 6) Black background
-        image = torch.where(mask.unsqueeze(0) == 1, image, torch.zeros_like(image))
+        # 7) Black background fill
+        bg = torch.zeros_like(image)
+        image = torch.where(mask.unsqueeze(0) == 1, image, bg)
 
-        # 7) Mild contrast boost
-        cvar = random.uniform(1.0, 1.5)
+        # 8) Mild contrast boost
+        cvar = random.uniform(1.0, 1.2)
         image = F.adjust_contrast(image, cvar).clamp(0, 1)
 
-        # 8) 2D rotation & flips
+        # 9) 2D rotations/flips
         rot = random.uniform(-10, 10)
         image = F.rotate(image, rot, interpolation=F.InterpolationMode.BILINEAR, fill=(0,0,0))
-        mask  = F.rotate(mask.unsqueeze(0), rot, interpolation=F.InterpolationMode.NEAREST, fill=0)[0].to(torch.uint8)
+        mask = F.rotate(mask.unsqueeze(0), rot, interpolation=F.InterpolationMode.NEAREST, fill=0)[0].to(torch.uint8)
         if random.random() < 0.5:
             image = F.hflip(image); mask = F.hflip(mask)
         if random.random() < 0.5:
             image = F.vflip(image); mask = F.vflip(mask)
 
-        # 9) Bounding box
+        # 10) Bounding box & target
         ys, xs = torch.nonzero(mask, as_tuple=True)
         if ys.numel():
             y0, y1 = ys.min().item(), ys.max().item() + 1
