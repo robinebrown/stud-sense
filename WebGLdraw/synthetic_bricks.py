@@ -99,7 +99,7 @@ class SyntheticBrickDataset(Dataset):
     def __getitem__(self, idx):
         # 1) Select the mesh and optionally apply color variation
         mesh = self.meshes[idx]
-        # 20% chance to tint the piece randomly
+        # 45% chance to tint the piece randomly
         if random.random() < 0.45:
             h = random.random()
             s = random.uniform(0.5, 1.0)
@@ -113,7 +113,7 @@ class SyntheticBrickDataset(Dataset):
         # 2) Sample random camera pose
         radius = self.radii[idx]
         azim = random.uniform(0, 360)
-        elev = random.uniform(15, 75)
+        elev = random.uniform(-75, 75)  # full range: underside, sides, top
         half_fov = math.radians(self.fov / 2)
         dist = (radius * self.camera_scale) / math.tan(half_fov)
         R, T = look_at_view_transform(dist, elev, azim, device=self.device)

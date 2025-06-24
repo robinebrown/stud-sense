@@ -17,18 +17,18 @@ spec.loader.exec_module(synthetic_bricks)
 from synthetic_bricks import SyntheticBrickDataset
 
 def main():
-    out_dir = "round_stud_viz"
+    out_dir = "single_brick_viz"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 2) Instantiate the dataset on CPU, pointing at the 3062a OBJ
+    # 2) Instantiate the dataset on CPU, pointing at the 3001 OBJ
     ds = SyntheticBrickDataset(
-        obj_dir="single_brick/3062a.obj",  # path to the 1×1 round solid-stud piece
+        obj_dir="single_brick/3001.obj",  # path to the 1×1 round solid-stud piece
         image_size=256,
         device="cpu"
     )
 
     # 3) Render 5 different random views
-    for view_num in range(1, 6):
+    for view_num in range(1, 11):
         image, target = ds[0]  # always index 0, but random pose each time
         mask = target["masks"][0].cpu().numpy()
 
@@ -37,16 +37,16 @@ def main():
 
         # 4) Save RGB and mask
         plt.imsave(
-            os.path.join(out_dir, f"3062a_view{view_num}_rgb.png"),
+            os.path.join(out_dir, f"3001_view{view_num}_rgb.png"),
             img_np
         )
         plt.imsave(
-            os.path.join(out_dir, f"3062a_view{view_num}_mask.png"),
+            os.path.join(out_dir, f"3001_view{view_num}_mask.png"),
             mask,
             cmap="gray"
         )
 
-    print(f"Saved 5 views of 3062a.obj to ./{out_dir}/")
+    print(f"Saved 5 views of 3001.obj to ./{out_dir}/")
 
 if __name__ == "__main__":
     main()
