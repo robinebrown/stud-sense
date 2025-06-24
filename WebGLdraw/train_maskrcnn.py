@@ -1,7 +1,6 @@
 # train_maskrcnn.py
 
-import multiprocessing as mp
-# Use 'spawn' to avoid CUDA re-init errors in forked DataLoader workers
+import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
 
 import os
