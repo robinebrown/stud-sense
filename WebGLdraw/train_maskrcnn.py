@@ -113,7 +113,10 @@ if __name__ == "__main__":
     parser.add_argument("--smoke_test", action="store_true", help="Use small subset for testing")
     parser.add_argument("--views_per_obj", type=int, default=10,
                         help="Number of random views per mesh per epoch")
+    parser.add_argument('--image_size',    type=int, default=256,
+                   help='input resolution (height and width)')
     args = parser.parse_args()
+
 
     # Device auto-selection
     if args.device:
