@@ -75,7 +75,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=True,         # dataset yields CUDA tensors
-        prefetch_factor=2,
+        prefetch_factor=0,
         persistent_workers=True
     )
 
