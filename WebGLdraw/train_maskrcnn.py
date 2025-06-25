@@ -14,19 +14,22 @@ from tqdm import tqdm
 from torch.cuda.amp import autocast
 from torch.amp import GradScaler
 
-class MultiViewDataset:
-    """Repeats each object multiple times to get multiple views per epoch."""
-    def __init__(self, base_dataset, views_per_obj=1):
-        self.base = base_dataset
-        self.views = views_per_obj
-    def __len__(self):
-        return len(self.base) * self.views
-    def __getitem__(self, idx):
-        return self.base[idx % len(self.base)]
 
 def collate_fn(batch):
-    images, targets = zip(*batch)
-    return list(images), list(targets)
+    return tuple(zip(*batch))
+
+class MultiViewDataset(torch.utils.data.Dataset):
+    def __init__(self, ds, views_per_obj):
+        self.ds = ds
+        self.views_per_obj = views_per_obj
+
+    def __len__(self):
+        return len(self.ds) * self.views_per_obj
+
+    def __getitem__(self, idx):
+        obj_idx = idx % len(self.ds)
+        return self.ds[obj_idx]
+
 
 def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
     # 1) Load dataset (on GPU)
@@ -52,7 +55,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=16,           # adjust as needed
+        num_workers=args.num_workers,           # adjust as needed via CLI flag
         pin_memory=False,         # dataset yields CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
@@ -66,15 +69,12 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         [p for p in model.parameters() if p.requires_grad],
         lr=lr
     )
-    # Pass device.type as the first (positional) argument
     scaler = GradScaler(device.type)
 
-    # 5) Training loop with mixed precision
     for epoch in range(1, epochs + 1):
+        print(f"Epoch {epoch}/{epochs}")
         running_loss = 0.0
-        print(f"\nEpoch {epoch}/{epochs}")
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
-            # move inputs
             images = [img.to(device) for img in images]
             moved_targets = []
             for t in targets:
@@ -82,7 +82,6 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
                       for k, v in t.items()}
                 moved_targets.append(t2)
 
-            # forward + backward under autocast
             with autocast():
                 loss_dict = model(images, moved_targets)
                 losses = sum(loss for loss in loss_dict.values())
@@ -94,14 +93,15 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
 
             running_loss += losses.item()
             if i % 50 == 0:
-                print(f"  Batch {i}/{len(loader)}  Loss: {losses.item():.4f}")
+                avg_loss = running_loss / 50
+                print(f"Epoch {epoch} Batch {i}/{len(loader)}  loss {avg_loss:.4f}")
+                running_loss = 0.0
 
-        avg_loss = running_loss / len(loader)
-        print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), f"maskrcnn_epoch{epoch}.pth")
 
     torch.save(model.state_dict(), "maskrcnn_final.pth")
     print("Training complete! Model saved to maskrcnn_final.pth")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -113,6 +113,12 @@ if __name__ == "__main__":
     parser.add_argument("--smoke_test", action="store_true", help="Use small subset for testing")
     parser.add_argument("--views_per_obj", type=int, default=10,
                         help="Number of random views per mesh per epoch")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=16,
+        help="number of DataLoader worker processes",
+    )
     args = parser.parse_args()
 
     # Device auto-selection
