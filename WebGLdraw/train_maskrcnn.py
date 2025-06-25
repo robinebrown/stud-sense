@@ -1,7 +1,7 @@
 # train_maskrcnn.py
 
 import torch.multiprocessing as mp
-# spawn + file_system sharing avoids FD exhaustion & CUDA-fork bugs
+# Use spawn + file_system sharing to avoid FD exhaustion and CUDA-fork issues
 mp.set_start_method('spawn', force=True)
 mp.set_sharing_strategy('file_system')
 
@@ -16,113 +16,115 @@ from torch.cuda.amp import autocast
 from torch.amp import GradScaler
 from torch.optim.lr_scheduler import MultiStepLR
 
-# use a fast 'fork' context inside DataLoader
-fork_ctx = get_context('fork')
+# ✱ Use a *spawn* context so CUDA can be initialized in worker processes
+spawn_ctx = get_context('spawn')
+
 
 def collate_fn(batch):
     imgs, tars = zip(*batch)
     return list(imgs), list(tars)
 
+
 def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--obj_dir",       default="objs")
-    p.add_argument("--epochs",     type=int,   default=30)
-    p.add_argument("--batch_size", type=int,   default=10)
-    p.add_argument("--lr",         type=float, default=1e-4)
-    p.add_argument("--device",        default=None)
-    p.add_argument("--smoke_test",    action="store_true")
-    p.add_argument("--views_per_obj", type=int, default=8)
-    p.add_argument("--image_size",    type=int, default=256)
-    p.add_argument("--num_workers",   type=int, default=16)
+    p = argparse.ArgumentParser("Train Mask R-CNN on synthetic LEGO bricks")
+    p.add_argument("--obj_dir",       default="objs", help="Folder with .obj meshes")
+    p.add_argument("--epochs",        type=int,   default=30)
+    p.add_argument("--batch_size",    type=int,   default=10)
+    p.add_argument("--lr",            type=float, default=1e-4)
+    p.add_argument("--device",        default=None, help="cuda, mps, or cpu")
+    p.add_argument("--smoke_test",    action="store_true", help="Use small subset for testing")
+    p.add_argument("--views_per_obj", type=int,   default=8,  help="Views per mesh per epoch")
+    p.add_argument("--image_size",    type=int,   default=256, help="Input height and width")
+    p.add_argument("--num_workers",   type=int,   default=16,  help="DataLoader worker count")
     return p.parse_args()
 
+
 def train(args):
-    # 1) GPU-based rendering, CPU dataset
+    # 1) Render on GPU in workers, but move outputs to CPU for pinning
     ds = SyntheticBrickDataset(
         obj_dir=args.obj_dir,
         image_size=args.image_size,
         max_meshes=200 if args.smoke_test else None,
-        device=args.device  # render on GPU
+        device=args.device  # render on CUDA
     )
     if args.smoke_test:
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
 
-    # 2) Repeat for multi-view
+    # 2) Multi-view wrapper
     if args.views_per_obj > 1:
         from torch.utils.data import Dataset
         class MultiView(Dataset):
             def __init__(self, base, v): self.base, self.v = base, v
-            def __len__(self): return len(self.base)*self.v
-            def __getitem__(self,i): return self.base[i % len(self.base)]
+            def __len__(self): return len(self.base) * self.v
+            def __getitem__(self, i): return self.base[i % len(self.base)]
         dataset = MultiView(ds, args.views_per_obj)
         print(f"→ Multi-view: {args.views_per_obj}×, size={len(dataset)}")
     else:
         dataset = ds
 
-    # 3) Fast DataLoader
+    # 3) DataLoader with spawn workers so they can use CUDA
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        multiprocessing_context=fork_ctx,
-        pin_memory=True,          # dataset yields CPU tensors
-        prefetch_factor=2,        # queue 2 batches ahead
+        multiprocessing_context=spawn_ctx,
+        pin_memory=True,
+        prefetch_factor=2,
         persistent_workers=True,
         collate_fn=collate_fn
     )
 
-    # 4) Model + AMP + scheduler
-    num_classes = len(ds)+1
-    model = maskrcnn_resnet50_fpn(num_classes=num_classes).to(args.device).train()
-    optim = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scaler = GradScaler()
-    sched  = MultiStepLR(optim, milestones=[8,12], gamma=0.1)
+    # 4) Model + optimizer + AMP + scheduler
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model = maskrcnn_resnet50_fpn(num_classes=len(ds) + 1).to(device).train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler    = GradScaler()
+    scheduler = MultiStepLR(optimizer, milestones=[8, 12], gamma=0.1)
 
-    # 5) Train loop
-    for e in range(1, args.epochs+1):
-        print(f"\nEpoch {e}/{args.epochs}")
-        running = 0.0
-        for i, (imgs, tars) in enumerate(tqdm(loader, desc="Batches"),1):
+    # 5) Training loop
+    for epoch in range(1, args.epochs + 1):
+        print(f"\nEpoch {epoch}/{args.epochs}")
+        running_loss = 0.0
+
+        for i, (imgs, tars) in enumerate(tqdm(loader, desc="Batches"), 1):
             # move batch to GPU
-            imgs_gpu = [im.to(args.device, non_blocking=True) for im in imgs]
+            imgs_gpu = [im.to(device, non_blocking=True) for im in imgs]
             tars_gpu = []
             for tar in tars:
-                tg = {k:(v.to(args.device, non_blocking=True) if torch.is_tensor(v) else v)
-                      for k,v in tar.items()}
+                tg = {
+                    k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
+                    for k, v in tar.items()
+                }
                 tars_gpu.append(tg)
 
-            if e==1 and i==1:
+            if epoch == 1 and i == 1:
                 print("image[0].shape =", imgs_gpu[0].shape)
 
+            # forward + backward
             with autocast():
-                lossdict = model(imgs_gpu, tars_gpu)
-                loss = sum(lossdict.values())
+                loss_dict = model(imgs_gpu, tars_gpu)
+                loss = sum(loss_dict.values())
 
-            optim.zero_grad()
+            optimizer.zero_grad()
             scaler.scale(loss).backward()
-            scaler.step(optim)
+            scaler.step(optimizer)
             scaler.update()
 
-            running += loss.item()
-            if i%50==0:
-                print(f"  Batch {i}/{len(loader)}  Loss={running/50:.4f}")
-                running = 0.0
+            running_loss += loss.item()
+            if i % 50 == 0:
+                avg = running_loss / 50
+                print(f"  Batch {i}/{len(loader)}  Loss: {avg:.4f}")
+                running_loss = 0.0
 
-        sched.step()
-        torch.save(model.state_dict(), f"maskrcnn_epoch{e}.pth")
+        scheduler.step()
+        torch.save(model.state_dict(), f"maskrcnn_epoch{epoch}.pth")
 
     torch.save(model.state_dict(), "maskrcnn_final.pth")
     print("Training complete — maskrcnn_final.pth saved")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     args = parse_args()
-    # pick device
-    if args.device:
-        dev = torch.device(args.device)
-    else:
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.device = dev
-    print("Training on:", dev)
+    print("Training on device:", args.device or "cuda")
     train(args)
