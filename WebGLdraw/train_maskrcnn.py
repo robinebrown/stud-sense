@@ -1,7 +1,7 @@
 # train_maskrcnn.py
 
 import multiprocessing as mp
-# Use 'spawn' to avoid CUDA re-init errors in forked DataLoader workers
+# Avoid CUDA re-init errors in forked DataLoader workers
 mp.set_start_method('spawn', force=True)
 
 import os
@@ -14,13 +14,15 @@ from tqdm import tqdm
 from torch.cuda.amp import autocast
 from torch.amp import GradScaler
 
-class MultiViewDataset:
+class MultiViewDataset(torch.utils.data.Dataset):
     """Repeats each object multiple times to get multiple views per epoch."""
     def __init__(self, base_dataset, views_per_obj=1):
         self.base = base_dataset
         self.views = views_per_obj
+
     def __len__(self):
         return len(self.base) * self.views
+
     def __getitem__(self, idx):
         return self.base[idx % len(self.base)]
 
@@ -28,11 +30,31 @@ def collate_fn(batch):
     images, targets = zip(*batch)
     return list(images), list(targets)
 
-def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
-    # 1) Load dataset (on GPU)
+def parse_args():
+    p = argparse.ArgumentParser("Train Mask R-CNN on synthetic LEGO bricks")
+    p.add_argument("--obj_dir",       default="objs",
+                   help="Folder with .obj meshes")
+    p.add_argument("--epochs",     type=int,   default=30)
+    p.add_argument("--batch_size", type=int,   default=10)
+    p.add_argument("--lr",         type=float, default=1e-4)
+    p.add_argument("--device",     default=None,
+                   help="cuda, mps, or cpu")
+    p.add_argument("--smoke_test", action="store_true",
+                   help="Use small subset for testing")
+    p.add_argument("--views_per_obj", type=int, default=10,
+                   help="Number of random views per mesh per epoch")
+    p.add_argument("--image_size", type=int, default=256,
+                   help="input resolution (height and width)")
+    p.add_argument("--num_workers", type=int, default=16,
+                   help="number of DataLoader worker processes")
+    return p.parse_args()
+
+def train(obj_dir, epochs, batch_size, lr, device,
+          smoke_test, views_per_obj, image_size, num_workers):
+    # 1) Load dataset
     ds = SyntheticBrickDataset(
         obj_dir=obj_dir,
-        image_size=256,
+        image_size=image_size,
         max_meshes=200 if smoke_test else None,
         device=device
     )
@@ -46,35 +68,33 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
     else:
         dataset = ds
 
-    # 3) High-parallel DataLoader
+    # 3) DataLoader
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=16,           # adjust as needed
+        num_workers=num_workers,
         pin_memory=False,         # dataset yields CUDA tensors
         prefetch_factor=2,
         persistent_workers=True
     )
 
-    # 4) Model, optimizer, and AMP scaler
+    # 4) Model + optimizer + scaler
     num_classes = len(ds) + 1  # +1 background
     model = maskrcnn_resnet50_fpn(num_classes=num_classes)
     model.to(device).train()
     optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr
+        [p for p in model.parameters() if p.requires_grad], lr=lr
     )
-    # Pass device.type as the first (positional) argument
     scaler = GradScaler(device.type)
 
-    # 5) Training loop with mixed precision
+    # 5) Training loop
     for epoch in range(1, epochs + 1):
         running_loss = 0.0
         print(f"\nEpoch {epoch}/{epochs}")
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
-            # move inputs
+            # Move inputs onto GPU
             images = [img.to(device) for img in images]
             moved_targets = []
             for t in targets:
@@ -82,7 +102,11 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
                       for k, v in t.items()}
                 moved_targets.append(t2)
 
-            # forward + backward under autocast
+            # ——— Debug print: confirm your input resolution ———
+            if epoch == 1 and i == 1:
+                print("image[0].shape =", images[0].shape)
+
+            # Forward + backward under autocast
             with autocast():
                 loss_dict = model(images, moved_targets)
                 losses = sum(loss for loss in loss_dict.values())
@@ -94,7 +118,9 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
 
             running_loss += losses.item()
             if i % 50 == 0:
-                print(f"  Batch {i}/{len(loader)}  Loss: {losses.item():.4f}")
+                avg = running_loss / 50
+                print(f"  Batch {i}/{len(loader)}  Loss: {avg:.4f}")
+                running_loss = 0.0
 
         avg_loss = running_loss / len(loader)
         print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
@@ -104,21 +130,8 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
     print("Training complete! Model saved to maskrcnn_final.pth")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--obj_dir",    default="objs",       help="Folder with .obj meshes")
-    parser.add_argument("--epochs",     type=int,   default=30)
-    parser.add_argument("--batch_size", type=int,   default=10)
-    parser.add_argument("--lr",         type=float, default=1e-4)
-    parser.add_argument("--device",     default=None, help="cuda, mps, or cpu")
-    parser.add_argument("--smoke_test", action="store_true", help="Use small subset for testing")
-    parser.add_argument("--views_per_obj", type=int, default=10,
-                        help="Number of random views per mesh per epoch")
-    parser.add_argument('--image_size',    type=int, default=256,
-                   help='input resolution (height and width)')
-    args = parser.parse_args()
-
-
-    # Device auto-selection
+    args = parse_args()
+    # Auto‐select device if none provided
     if args.device:
         device = torch.device(args.device)
     else:
@@ -137,5 +150,7 @@ if __name__ == "__main__":
         lr=args.lr,
         device=device,
         smoke_test=args.smoke_test,
-        views_per_obj=args.views_per_obj
+        views_per_obj=args.views_per_obj,
+        image_size=args.image_size,
+        num_workers=args.num_workers
     )
