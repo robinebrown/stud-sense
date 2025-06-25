@@ -1,23 +1,25 @@
 # train_maskrcnn.py
 
 import torch.multiprocessing as mp
-# Use spawn for worker safety...
+# global safety: use spawn + file_system sharing
 mp.set_start_method('spawn', force=True)
-# …and switch to file_system sharing to avoid FD‐exhaustion errors
 mp.set_sharing_strategy('file_system')
 
 import argparse
 import time
 import torch
-# Speed up fixed‐size convs
 torch.backends.cudnn.benchmark = True
 
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
 
+# we’ll explicitly fork for DataLoader workers
+from torch.multiprocessing import get_context
+fork_ctx = get_context('fork')
+
 class MultiViewDataset(Dataset):
-    """Repeats each mesh N times for multi‐view training."""
+    """Repeat each mesh N times for multi-view training."""
     def __init__(self, base_dataset, views_per_obj):
         self.base = base_dataset
         self.views = views_per_obj
@@ -32,9 +34,8 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train Mask R-CNN on synthetic LEGO bricks")
-    p.add_argument('--obj_dir',       type=str, required=True,
-                   help='directory containing .obj files')
+    p = argparse.ArgumentParser("Train Mask R-CNN on synthetic LEGO bricks")
+    p.add_argument('--obj_dir',       type=str, required=True)
     p.add_argument('--epochs',        type=int, default=15)
     p.add_argument('--batch_size',    type=int, default=12)
     p.add_argument('--lr',            type=float, default=1e-4)
@@ -42,17 +43,16 @@ def parse_args():
     p.add_argument('--views_per_obj', type=int, default=8)
     p.add_argument('--num_workers',   type=int, default=32)
     p.add_argument('--image_size',    type=int, default=256)
-    p.add_argument('--smoke_test',    action='store_true',
-                   help='quick smoke-test on 200 meshes, 2 epochs, 1 view')
+    p.add_argument('--smoke_test',    action='store_true')
     return p.parse_args()
 
 def train(args):
     model_dev = torch.device(args.device)
-    cpu_dev   = 'cpu'
+    cpu_dev   = 'cpu'  # render & load entirely on CPU
 
-    # Build dataset (always on CPU now)
+    # Build base dataset
     if args.smoke_test:
-        print("→ [Smoke-test] using first 200 meshes")
+        print("→ [Smoke-test] loading 200 meshes")
         base_ds = SyntheticBrickDataset(
             obj_dir=args.obj_dir,
             image_size=args.image_size,
@@ -71,16 +71,17 @@ def train(args):
     ds = MultiViewDataset(base_ds, views)
     print(f"Dataset size: {len(ds)} samples ({len(base_ds)} meshes × {views} views)")
 
-    # DataLoader on CPU tensors
+    # DataLoader: fork workers, pin CPU tensors, no persistent_workers, minimal prefetch
     loader = DataLoader(
         ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,           # safe: now outputs CPU tensors
-        persistent_workers=True,
-        prefetch_factor=2,
-        collate_fn=collate_fn
+        pin_memory=True,
+        persistent_workers=False,
+        prefetch_factor=1,
+        collate_fn=collate_fn,
+        multiprocessing_context=fork_ctx,
     )
 
     # Build model
@@ -91,7 +92,7 @@ def train(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scaler    = torch.cuda.amp.GradScaler()
 
-    # Training loop with timing
+    # Training loop (with simple timing)
     for epoch in range(1, epochs+1):
         model.train()
         loss_accum = 0.0
@@ -99,20 +100,20 @@ def train(args):
         for i, (imgs_cpu, targs_cpu) in enumerate(loader, 1):
             # measure data→GPU time
             t0 = time.perf_counter()
-            images  = [img.to(model_dev, non_blocking=True) for img in imgs_cpu]
+            images = [img.to(model_dev, non_blocking=True) for img in imgs_cpu]
             targets = []
             for t in targs_cpu:
-                t2 = {}
-                for k, v in t.items():
-                    t2[k] = v.to(model_dev, non_blocking=True) if isinstance(v, torch.Tensor) else v
-                targets.append(t2)
-            load_time = time.perf_counter() - t0
+                d = {}
+                for k,v in t.items():
+                    d[k] = v.to(model_dev, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                targets.append(d)
+            data_time = time.perf_counter() - t0
 
-            # measure GPU compute time
+            # GPU forward/backward
             t1 = time.perf_counter()
             with torch.cuda.amp.autocast():
-                loss_dict = model(images, targets)
-                loss = sum(loss_dict.values())
+                losses = model(images, targets)
+                loss = sum(losses.values())
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -121,18 +122,18 @@ def train(args):
 
             loss_accum += loss.item()
             if i % 50 == 0:
-                print(f"Epoch {epoch} Batch {i}/{len(loader)} "
-                      f"| data {load_time:.3f}s gpu {gpu_time:.3f}s "
-                      f"| loss {loss_accum/50:.4f}")
+                print(f"Epoch {epoch} Batch {i}/{len(loader)}  "
+                      f"data {data_time:.3f}s  gpu {gpu_time:.3f}s  "
+                      f"loss {loss_accum/50:.4f}")
                 loss_accum = 0.0
 
-        print(f"Epoch {epoch}/{epochs} done — saving maskrcnn_epoch_{epoch}.pth")
+        print(f"Epoch {epoch}/{epochs} done, saving maskrcnn_epoch_{epoch}.pth")
         torch.save(model.state_dict(), f"maskrcnn_epoch_{epoch}.pth")
 
     torch.save(model.state_dict(), "maskrcnn_final.pth")
-    print("Training complete. Final model saved to maskrcnn_final.pth")
+    print("Training complete — saved maskrcnn_final.pth")
 
 if __name__ == '__main__':
     args = parse_args()
-    print(f"Training on device: {args.device}  |  Rendering on CPU")
+    print(f"Training on {args.device}  |  Rendering on CPU")
     train(args)
