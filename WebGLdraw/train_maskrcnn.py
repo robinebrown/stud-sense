@@ -31,13 +31,13 @@ class MultiViewDataset(torch.utils.data.Dataset):
         return self.ds[obj_idx]
 
 
-def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
-    # 1) Load dataset (on GPU)
+def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj, num_workers):
+    # 1) Load dataset on CPU to avoid per-worker GPU allocations
     ds = SyntheticBrickDataset(
         obj_dir=obj_dir,
         image_size=256,
         max_meshes=200 if smoke_test else None,
-        device=device
+        device=torch.device("cpu")
     )
     if smoke_test:
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
@@ -49,16 +49,17 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
     else:
         dataset = ds
 
-    # 3) High-parallel DataLoader
+    # 3) High-parallel DataLoader with pin_memory for faster host→device transfers
+    #    and persistent_workers disabled to free GPU memory between epochs
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=args.num_workers,           # adjust as needed via CLI flag
-        pin_memory=False,         # dataset yields CUDA tensors
+        num_workers=num_workers,
+        pin_memory=True,
         prefetch_factor=2,
-        persistent_workers=True
+        persistent_workers=False
     )
 
     # 4) Model, optimizer, and AMP scaler
@@ -75,6 +76,7 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
         print(f"Epoch {epoch}/{epochs}")
         running_loss = 0.0
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
+            # Transfer batch from CPU to GPU
             images = [img.to(device) for img in images]
             moved_targets = []
             for t in targets:
@@ -105,19 +107,23 @@ def train(obj_dir, epochs, batch_size, lr, device, smoke_test, views_per_obj):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--obj_dir",    default="objs",       help="Folder with .obj meshes")
-    parser.add_argument("--epochs",     type=int,   default=30)
-    parser.add_argument("--batch_size", type=int,   default=10)
-    parser.add_argument("--lr",         type=float, default=1e-4)
-    parser.add_argument("--device",     default=None, help="cuda, mps, or cpu")
+    parser.add_argument("--obj_dir", default="objs", help="Folder with .obj meshes")
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--device", default=None, help="cuda, mps, or cpu")
     parser.add_argument("--smoke_test", action="store_true", help="Use small subset for testing")
-    parser.add_argument("--views_per_obj", type=int, default=10,
-                        help="Number of random views per mesh per epoch")
+    parser.add_argument(
+        "--views_per_obj",
+        type=int,
+        default=10,
+        help="Number of random views per mesh per epoch"
+    )
     parser.add_argument(
         "--num_workers",
         type=int,
         default=16,
-        help="number of DataLoader worker processes",
+        help="number of DataLoader worker processes"
     )
     args = parser.parse_args()
 
@@ -140,5 +146,6 @@ if __name__ == "__main__":
         lr=args.lr,
         device=device,
         smoke_test=args.smoke_test,
-        views_per_obj=args.views_per_obj
+        views_per_obj=args.views_per_obj,
+        num_workers=args.num_workers
     )
