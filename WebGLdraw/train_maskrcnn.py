@@ -6,6 +6,8 @@ mp.set_start_method('spawn', force=True)
 import os
 import argparse
 import torch
+import torch.backends.cudnn as cudnn
+cudnn.benchmark = True
 from torch.utils.data import DataLoader
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
@@ -75,7 +77,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=True,         # dataset yields CUDA tensors
-        prefetch_factor=(2 if num_workers > 0 else None),
+        prefetch_factor=(4 if num_workers > 0 else None),
         persistent_workers=True
     )
 
