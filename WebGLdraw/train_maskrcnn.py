@@ -13,6 +13,7 @@ from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
 from torch.cuda.amp import autocast
 from torch.amp import GradScaler
+from torch.optim.lr_scheduler import MultiStepLR  # <-- add this import
 
 class MultiViewDataset(torch.utils.data.Dataset):
     """Repeats each object multiple times to get multiple views per epoch."""
@@ -80,7 +81,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         persistent_workers=True
     )
 
-    # 4) Model + optimizer + scaler
+    # 4) Model + optimizer + scaler + scheduler
     num_classes = len(ds) + 1  # +1 background
     model = maskrcnn_resnet50_fpn(num_classes=num_classes)
     model.to(device).train()
@@ -88,6 +89,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         [p for p in model.parameters() if p.requires_grad], lr=lr
     )
     scaler = GradScaler(device.type)
+    scheduler = MultiStepLR(optimizer, milestones=[8, 12], gamma=0.1)  # <-- scheduler
 
     # 5) Training loop
     for epoch in range(1, epochs + 1):
@@ -122,6 +124,9 @@ def train(obj_dir, epochs, batch_size, lr, device,
                 print(f"  Batch {i}/{len(loader)}  Loss: {avg:.4f}")
                 running_loss = 0.0
 
+        # step the LR scheduler
+        scheduler.step()  # <-- add this line
+
         avg_loss = running_loss / len(loader)
         print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), f"maskrcnn_epoch{epoch}.pth")
@@ -131,7 +136,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
 
 if __name__ == "__main__":
     args = parse_args()
-    # Auto‐select device if none provided
+    # Auto-select device if none provided
     if args.device:
         device = torch.device(args.device)
     else:
