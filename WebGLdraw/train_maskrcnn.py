@@ -7,7 +7,7 @@ mp.set_sharing_strategy('file_system')
 
 import argparse
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.multiprocessing import get_context
 from torchvision.models.detection import maskrcnn_resnet50_fpn
 from synthetic_bricks import SyntheticBrickDataset
@@ -16,13 +16,26 @@ from torch.cuda.amp import autocast
 from torch.amp import GradScaler
 from torch.optim.lr_scheduler import MultiStepLR
 
-# ✱ Use a *spawn* context so CUDA can be initialized in worker processes
+# Use spawn context so workers can initialize CUDA for rendering
 spawn_ctx = get_context('spawn')
 
 
+class MultiViewDataset(Dataset):
+    """Repeat each mesh multiple times for multi-view training."""
+    def __init__(self, base_dataset, views_per_obj=1):
+        self.base = base_dataset
+        self.views = views_per_obj
+
+    def __len__(self):
+        return len(self.base) * self.views
+
+    def __getitem__(self, idx):
+        return self.base[idx % len(self.base)]
+
+
 def collate_fn(batch):
-    imgs, tars = zip(*batch)
-    return list(imgs), list(tars)
+    images, targets = zip(*batch)
+    return list(images), list(targets)
 
 
 def parse_args():
@@ -40,42 +53,37 @@ def parse_args():
 
 
 def train(args):
-    # 1) Render on GPU in workers, but move outputs to CPU for pinning
+    # 1) GPU-based rendering, CPU dataset outputs
     ds = SyntheticBrickDataset(
         obj_dir=args.obj_dir,
         image_size=args.image_size,
         max_meshes=200 if args.smoke_test else None,
-        device=args.device  # render on CUDA
+        device=args.device   # render on GPU
     )
     if args.smoke_test:
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
 
-    # 2) Multi-view wrapper
+    # 2) Wrap in MultiViewDataset if needed
     if args.views_per_obj > 1:
-        from torch.utils.data import Dataset
-        class MultiView(Dataset):
-            def __init__(self, base, v): self.base, self.v = base, v
-            def __len__(self): return len(self.base) * self.v
-            def __getitem__(self, i): return self.base[i % len(self.base)]
-        dataset = MultiView(ds, args.views_per_obj)
+        dataset = MultiViewDataset(ds, args.views_per_obj)
         print(f"→ Multi-view: {args.views_per_obj}×, size={len(dataset)}")
     else:
         dataset = ds
 
-    # 3) DataLoader with spawn workers so they can use CUDA
+    # 3) DataLoader with spawn workers for CUDA rendering
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         multiprocessing_context=spawn_ctx,
-        pin_memory=True,
+        pin_memory=True,          # ds returns CPU tensors
         prefetch_factor=2,
         persistent_workers=True,
         collate_fn=collate_fn
     )
 
-    # 4) Model + optimizer + AMP + scheduler
+    # 4) Model + optimizer + AMP scaler + scheduler
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model = maskrcnn_resnet50_fpn(num_classes=len(ds) + 1).to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -88,20 +96,20 @@ def train(args):
         running_loss = 0.0
 
         for i, (imgs, tars) in enumerate(tqdm(loader, desc="Batches"), 1):
-            # move batch to GPU
+            # Move batch to GPU
             imgs_gpu = [im.to(device, non_blocking=True) for im in imgs]
             tars_gpu = []
             for tar in tars:
-                tg = {
-                    k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v)
+                tup = {
+                    k: (v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
                     for k, v in tar.items()
                 }
-                tars_gpu.append(tg)
+                tars_gpu.append(tup)
 
             if epoch == 1 and i == 1:
                 print("image[0].shape =", imgs_gpu[0].shape)
 
-            # forward + backward
+            # Forward + backward under autocast
             with autocast():
                 loss_dict = model(imgs_gpu, tars_gpu)
                 loss = sum(loss_dict.values())
