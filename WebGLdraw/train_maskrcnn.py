@@ -13,7 +13,7 @@ from synthetic_bricks import SyntheticBrickDataset
 from tqdm import tqdm
 from torch.cuda.amp import autocast
 from torch.amp import GradScaler
-from torch.optim.lr_scheduler import MultiStepLR  # <-- add this import
+from torch.optim.lr_scheduler import MultiStepLR  # scheduler import
 
 class MultiViewDataset(torch.utils.data.Dataset):
     """Repeats each object multiple times to get multiple views per epoch."""
@@ -52,12 +52,12 @@ def parse_args():
 
 def train(obj_dir, epochs, batch_size, lr, device,
           smoke_test, views_per_obj, image_size, num_workers):
-    # 1) Load dataset
+    # 1) Load dataset on CPU to avoid preloading meshes into GPU memory
     ds = SyntheticBrickDataset(
         obj_dir=obj_dir,
         image_size=image_size,
         max_meshes=200 if smoke_test else None,
-        device=device
+        device='cpu'
     )
     if smoke_test:
         print(f"→ [Smoke-test] using first {len(ds)} meshes")
@@ -76,7 +76,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=num_workers,
-        pin_memory=False,         # dataset yields CUDA tensors
+        pin_memory=True,         # now safe: dataset yields CPU tensors
         prefetch_factor=2,
         persistent_workers=True
     )
@@ -89,7 +89,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
         [p for p in model.parameters() if p.requires_grad], lr=lr
     )
     scaler = GradScaler(device.type)
-    scheduler = MultiStepLR(optimizer, milestones=[8, 12], gamma=0.1)  # <-- scheduler
+    scheduler = MultiStepLR(optimizer, milestones=[8, 12], gamma=0.1)
 
     # 5) Training loop
     for epoch in range(1, epochs + 1):
@@ -97,14 +97,14 @@ def train(obj_dir, epochs, batch_size, lr, device,
         print(f"\nEpoch {epoch}/{epochs}")
         for i, (images, targets) in enumerate(tqdm(loader, desc="Batches"), 1):
             # Move inputs onto GPU
-            images = [img.to(device) for img in images]
+            images = [img.to(device, non_blocking=True) for img in images]
             moved_targets = []
             for t in targets:
-                t2 = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                t2 = {k: (v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
                       for k, v in t.items()}
                 moved_targets.append(t2)
 
-            # ——— Debug print: confirm your input resolution ———
+            # Debug: confirm input resolution
             if epoch == 1 and i == 1:
                 print("image[0].shape =", images[0].shape)
 
@@ -125,7 +125,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
                 running_loss = 0.0
 
         # step the LR scheduler
-        scheduler.step()  # <-- add this line
+        scheduler.step()
 
         avg_loss = running_loss / len(loader)
         print(f"Epoch {epoch} completed. Avg loss: {avg_loss:.4f}")
