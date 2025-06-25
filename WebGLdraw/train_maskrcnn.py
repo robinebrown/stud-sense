@@ -89,7 +89,7 @@ def train(obj_dir, epochs, batch_size, lr, device,
     model = maskrcnn_resnet50_fpn(num_classes=num_classes)
     model.to(device).train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    scaler    = GradScaler(device_type="cuda")
+    scaler    = GradScaler()  # no device_type arg
     scheduler = MultiStepLR(optimizer, milestones=[8, 12], gamma=0.1)
 
     # 5) Training loop
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     else:
         device = (
             torch.device("cuda") if torch.cuda.is_available()
-            else torch.device("mps") if torch.backends.mps.is_available()
+            else torch.device("mps")  if torch.backends.mps.is_available()
             else torch.device("cpu")
         )
     print("Training on device:", device)
