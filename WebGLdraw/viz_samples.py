@@ -20,9 +20,9 @@ def main():
     out_dir = "single_brick_viz"
     os.makedirs(out_dir, exist_ok=True)
 
-    # 2) Instantiate the dataset on CPU, pointing at the 3001 OBJ
+    # 2) Instantiate the dataset on CPU, pointing at the 3823 OBJ
     ds = SyntheticBrickDataset(
-        obj_dir="single_brick/3001.obj",  # path to the 1×1 round solid-stud piece
+        obj_dir="objs/3823.obj",  # path to the 1×1 round solid-stud piece
         image_size=256,
         device="cpu"
     )
@@ -37,16 +37,16 @@ def main():
 
         # 4) Save RGB and mask
         plt.imsave(
-            os.path.join(out_dir, f"3001_view{view_num}_rgb.png"),
+            os.path.join(out_dir, f"3823_view{view_num}_rgb.png"),
             img_np
         )
         plt.imsave(
-            os.path.join(out_dir, f"3001_view{view_num}_mask.png"),
+            os.path.join(out_dir, f"3823_view{view_num}_mask.png"),
             mask,
             cmap="gray"
         )
 
-    print(f"Saved 5 views of 3001.obj to ./{out_dir}/")
+    print(f"Saved 5 views of 3823.obj to ./{out_dir}/")
 
 if __name__ == "__main__":
     main()

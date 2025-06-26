@@ -1,9 +1,9 @@
 0 LDraw.org Configuration File
 0 Name: LDConfig.ldr
 0 Author: LDraw.org
-0 !LDRAW_ORG Configuration UPDATE 2025-05-20
+0 !LDRAW_ORG Configuration UPDATE 2025-06-11
 
-0 // Last update: Added Canvas color 20288, 20010, 20086,
+0 // Last update: Added 424 - Ochre Yellow
 
 0 // * LDraw and BrickLink mostly share naming conventions for their colours.
 0 // * Where possible LEGO colour numbers were used.
@@ -194,6 +194,8 @@
 0 !COLOUR Reddish_Orange                                        CODE 402   VALUE #CA4C0B   EDGE #333333
 0                              // LEGOID 422 - Sienna Brown
 0 !COLOUR Sienna_Brown                                          CODE 422   VALUE #915C3C   EDGE #333333
+0                              // LEGOID 424 - Ochre Yellow 
+0 !COLOUR Ochre_Yellow                                          CODE 424   VALUE #DD9E47   EDGE #333333
 0                              // LEGOID 432 - Umber Brown 
 0 !COLOUR Umber_Brown                                           CODE 423   VALUE #543F33   EDGE #333333
 0                              // LEGOID   4 - Brick Red
