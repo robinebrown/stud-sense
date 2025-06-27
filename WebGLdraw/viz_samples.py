@@ -1,52 +1,65 @@
 # viz_samples.py
 
 import os
-import matplotlib.pyplot as plt
 import torch
-import importlib.util
-import sys
+import matplotlib.pyplot as plt
+from synthetic_bricks_v2 import SyntheticBrickDatasetV2
 
-# 1) Dynamically load your synthetic_bricks module
-spec = importlib.util.spec_from_file_location(
-    "synthetic_bricks", os.path.join(os.path.dirname(__file__), "synthetic_bricks.py")
-)
-synthetic_bricks = importlib.util.module_from_spec(spec)
-sys.modules["synthetic_bricks"] = synthetic_bricks
-spec.loader.exec_module(synthetic_bricks)
+# ← change this to point at any .obj you like:
+OBJ_PATH   = "objs/3823.obj"
+NUM_VIEWS  = 5
+IMAGE_SIZE = 256
+OUTPUT_DIR = "Users/robinbrown/repos/stud-sense/WebGLdraw/viz_outputs"
 
-from synthetic_bricks import SyntheticBrickDataset
+def normalize_img_tensor(tensor):
+    """
+    Ensure tensor is (3, H, W).  
+    Handles cases where channels might be last or there's an extra batch dim.
+    """
+    # remove singleton batch dim
+    if tensor.ndim == 4 and tensor.shape[0] == 1:
+        tensor = tensor.squeeze(0)
+    # if it’s H×W×3, move channels first
+    if tensor.ndim == 3 and tensor.shape[-1] == 3:
+        tensor = tensor.permute(2, 0, 1)
+    return tensor
 
 def main():
-    out_dir = "single_brick_viz"
-    os.makedirs(out_dir, exist_ok=True)
+    if not os.path.isfile(OBJ_PATH):
+        raise FileNotFoundError(f"OBJ not found: {OBJ_PATH}")
+    print("Rendering mesh:", OBJ_PATH)
 
-    # 2) Instantiate the dataset on CPU, pointing at the 3823 OBJ
-    ds = SyntheticBrickDataset(
-        obj_dir="objs/3823.obj",  # path to the 1×1 round solid-stud piece
-        image_size=256,
-        device="cpu"
+    ds = SyntheticBrickDatasetV2(
+        obj_dir=OBJ_PATH,
+        image_size=IMAGE_SIZE,
+        device="cpu",
+        views_per_obj=NUM_VIEWS,
+        colors_csv="colors.csv",
+        elements_csv="elements.csv"
     )
+    ds.force_gradient = True
 
-    # 3) Render 5 different random views
-    for view_num in range(1, 11):
-        image, target = ds[0]  # always index 0, but random pose each time
-        mask = target["masks"][0].cpu().numpy()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-        # clamp RGB to [0,1]
-        img_np = image.cpu().permute(1, 2, 0).numpy().clip(0.0, 1.0)
+    for i in range(NUM_VIEWS):
+        img_tensor, target = ds[i]   # could be (H,W,3), (3,H,W), or (1,3,H,W)
+        mask = target['mask'].cpu().numpy()
 
-        # 4) Save RGB and mask
-        plt.imsave(
-            os.path.join(out_dir, f"3823_view{view_num}_rgb.png"),
-            img_np
-        )
-        plt.imsave(
-            os.path.join(out_dir, f"3823_view{view_num}_mask.png"),
-            mask,
-            cmap="gray"
-        )
+        # normalize to (3, H, W)
+        img_tensor = normalize_img_tensor(img_tensor)
+        assert img_tensor.ndim == 3 and img_tensor.shape[0] == 3, \
+            f"After normalization got shape {img_tensor.shape}"
 
-    print(f"Saved 5 views of 3823.obj to ./{out_dir}/")
+        # to H×W×3 uint8
+        rgb = img_tensor.mul(255).byte().permute(1,2,0).cpu().numpy().copy()
+        print(f"View {i+1} RGB shape:", rgb.shape)  # should be (256,256,3)
+
+        # save
+        rgb_path  = os.path.join(OUTPUT_DIR, f"view_{i+1:02d}_rgb.png")
+        mask_path = os.path.join(OUTPUT_DIR, f"view_{i+1:02d}_mask.png")
+        plt.imsave(rgb_path, rgb)
+        plt.imsave(mask_path, mask, cmap="gray")
+        print(f"Saved view {i+1}: {rgb_path}, {mask_path}")
 
 if __name__ == "__main__":
     main()
