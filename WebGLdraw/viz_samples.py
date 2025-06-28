@@ -9,7 +9,7 @@ from synthetic_bricks_v2 import SyntheticBrickDatasetV2
 OBJ_PATH   = "objs/3823.obj"
 NUM_VIEWS  = 5
 IMAGE_SIZE = 256
-OUTPUT_DIR = "Users/robinbrown/repos/stud-sense/WebGLdraw/viz_outputs"
+OUTPUT_DIR = "viz_outputs"
 
 def normalize_img_tensor(tensor):
     """
