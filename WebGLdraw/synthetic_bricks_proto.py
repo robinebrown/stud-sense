@@ -17,7 +17,7 @@ from pytorch3d.renderer import (
 from torchvision.transforms import functional as F
 import torchvision.utils as vutils
 
-# List of 20 prototype part IDs
+# Default list of 20 prototype part IDs
 PART_IDS = [
     "3001","3003","3020","3022","3040","54200","3665","3062","4740","15254",
     "4865","32000","3673","3626","2555","6238","51239","88293","2817","30414"
@@ -30,10 +30,10 @@ class SyntheticBrickProtoDataset(Dataset):
     def __init__(self,
                  obj_dir,
                  part_ids,
-                 image_size=256,
-                 render_scale=4,
+                 image_size=330,
+                 render_scale=3,
                  views_per_obj=1,
-                 device="cuda",
+                 device="cpu",
                  camera_scale=2.5,
                  fov=60.0):
         self.device = torch.device(device)
@@ -143,7 +143,7 @@ class SyntheticBrickProtoDataset(Dataset):
         mask_crop = F.pad(mask_crop.unsqueeze(0), pad, fill=0).squeeze(0)
 
         # === Add extra 20px border padding ===
-        border = 45
+        border = 60
         crop = F.pad(crop, (border, border, border, border), fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), (border, border, border, border), fill=0).squeeze(0)
 
@@ -159,19 +159,38 @@ class SyntheticBrickProtoDataset(Dataset):
 
 
 if __name__ == '__main__':
-    # Smoke-test rendering and save to disk
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images and masks.")
+    parser.add_argument('--part-ids', type=str,
+                        help='Comma-separated list of LDraw IDs to render (e.g. "3001,3020,3626").')
+    parser.add_argument('--views_per_obj', type=int, default=1,
+                        help='How many random views to render per part (default=1).')
+    parser.add_argument('--size', type=int, default=330,
+                        help='Output image size in pixels (square, default=330).')
+    parser.add_argument('--render_scale', type=int, default=3,
+                        help='Supersampling scale factor for rendering (default=3).')
+    parser.add_argument('--device', type=str, default='cpu',
+                        help='Torch device to use (cpu or cuda, default=cpu).')
+    parser.add_argument('--out_dir', type=str, default='viz_outputs/proto',
+                        help='Directory to save rendered images and masks.')
+    args = parser.parse_args()
+
+    # Determine which parts to render
+    selected_ids = args.part_ids.split(',') if args.part_ids else PART_IDS
+
     ds = SyntheticBrickProtoDataset(
         obj_dir='objs',
-        part_ids=PART_IDS,
-        image_size=330,
-        render_scale=4,
-        views_per_obj=1,
-        device='cpu'
+        part_ids=selected_ids,
+        image_size=args.size,
+        render_scale=args.render_scale,
+        views_per_obj=args.views_per_obj,
+        device=args.device
     )
-    out_dir = 'viz_outputs/proto'
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
     for i in range(len(ds)):
         img, meta = ds[i]
-        vutils.save_image(img, f'{out_dir}/sample_{i:03d}.png')
-        vutils.save_image(meta['mask'].unsqueeze(0).float(), f'{out_dir}/sample_{i:03d}_mask.png')
-    print('Rendered', len(ds), 'samples to', out_dir)
+        vutils.save_image(img, f'{args.out_dir}/sample_{i:03d}.png')
+        vutils.save_image(meta['mask'].unsqueeze(0).float(),
+                          f'{args.out_dir}/sample_{i:03d}_mask.png')
+    print('Rendered', len(ds), 'samples to', args.out_dir)
