@@ -32,7 +32,7 @@ class SyntheticBrickProtoDataset(Dataset):
                  part_ids,
                  image_size=330,
                  render_scale=3,
-                 views_per_obj=1,
+                 views_per_obj=5,
                  device="cpu",
                  camera_scale=2.5,
                  fov=60.0):
