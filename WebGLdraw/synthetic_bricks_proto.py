@@ -143,7 +143,7 @@ class SyntheticBrickProtoDataset(Dataset):
         mask_crop = F.pad(mask_crop.unsqueeze(0), pad, fill=0).squeeze(0)
 
         # === Add extra 20px border padding ===
-        border = 60
+        border = 45
         crop = F.pad(crop, (border, border, border, border), fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), (border, border, border, border), fill=0).squeeze(0)
 
@@ -179,6 +179,7 @@ if __name__ == '__main__':
     # Determine which parts to render
     selected_ids = args.part_ids.split(',') if args.part_ids else PART_IDS
 
+    # Initialize dataset
     ds = SyntheticBrickProtoDataset(
         obj_dir='objs',
         part_ids=selected_ids,
@@ -188,9 +189,20 @@ if __name__ == '__main__':
         device=args.device
     )
     os.makedirs(args.out_dir, exist_ok=True)
-    for i in range(len(ds)):
-        img, meta = ds[i]
-        vutils.save_image(img, f'{args.out_dir}/sample_{i:03d}.png')
+
+    # Number of parts for naming
+    num_parts = len(selected_ids)
+
+    # Render and save with partID_viewNumber naming
+    for idx in range(len(ds)):
+        img, meta = ds[idx]
+        mesh_idx = idx % num_parts
+        view_idx = idx // num_parts + 1
+        pid = selected_ids[mesh_idx]
+        img_name = f"{pid}_{view_idx:02d}.png"
+        mask_name = f"{pid}_{view_idx:02d}_mask.png"
+        vutils.save_image(img, os.path.join(args.out_dir, img_name))
         vutils.save_image(meta['mask'].unsqueeze(0).float(),
-                          f'{args.out_dir}/sample_{i:03d}_mask.png')
-    print('Rendered', len(ds), 'samples to', args.out_dir)
+                          os.path.join(args.out_dir, mask_name))
+
+    print(f"Rendered {len(ds)} samples to {args.out_dir}")
