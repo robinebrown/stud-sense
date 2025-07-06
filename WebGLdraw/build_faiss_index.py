@@ -4,6 +4,7 @@ import torch
 import faiss
 import pickle
 import argparse
+import numpy as np
 from torchvision import models, transforms
 from PIL import Image
 
