@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 from synthetic_bricks_v2 import SyntheticBrickDatasetV2
 
 # ← change this to point at any .obj you like:
-OBJ_PATH   = "objs/3823.obj"
+OBJ_PATH   = "objs/3001.obj"
 NUM_VIEWS  = 5
-IMAGE_SIZE = 256
+IMAGE_SIZE = 330
 OUTPUT_DIR = "viz_outputs"
 
 def normalize_img_tensor(tensor):
@@ -34,8 +34,6 @@ def main():
         image_size=IMAGE_SIZE,
         device="cpu",
         views_per_obj=NUM_VIEWS,
-        colors_csv="colors.csv",
-        elements_csv="elements.csv"
     )
     ds.force_gradient = True
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import math
 import random
@@ -138,11 +139,11 @@ class SyntheticBrickProtoDataset(Dataset):
             pad = (diff // 2, 0, diff - diff // 2, 0)
         else:
             diff = w - h
-            pad = (0, diff // 2, 0, diff - diff // 2)
+            pad = (0, diff // 2, 0, diff - 0 // 2)
         crop = F.pad(crop, pad, fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), pad, fill=0).squeeze(0)
 
-        # === Add extra 20px border padding ===
+        # Add extra 20px border padding
         border = 45
         crop = F.pad(crop, (border, border, border, border), fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), (border, border, border, border), fill=0).squeeze(0)
@@ -161,27 +162,20 @@ class SyntheticBrickProtoDataset(Dataset):
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images and masks.")
-    parser.add_argument('--part-ids', type=str,
-                        help='Comma-separated list of LDraw IDs to render (e.g. "3001,3020,3626").')
-    parser.add_argument('--views_per_obj', type=int, default=1,
-                        help='How many random views to render per part (default=1).')
-    parser.add_argument('--size', type=int, default=330,
-                        help='Output image size in pixels (square, default=330).')
-    parser.add_argument('--render_scale', type=int, default=3,
-                        help='Supersampling scale factor for rendering (default=3).')
-    parser.add_argument('--device', type=str, default='cpu',
-                        help='Torch device to use (cpu or cuda, default=cpu).')
-    parser.add_argument('--out_dir', type=str, default='viz_outputs/proto',
-                        help='Directory to save rendered images and masks.')
+    parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images, masks, and labels.")
+    parser.add_argument('--obj_dir', type=str, required=True, help='Directory of .obj files (e.g. objs)')
+    parser.add_argument('--out_dir', type=str, required=True, help='Where to save images, masks, and labels')
+    parser.add_argument('--part-ids', type=str, help='Comma-separated LDraw IDs (e.g. "3001,3020")')
+    parser.add_argument('--views_per_obj', type=int, default=5, help='How many views per part')
+    parser.add_argument('--size', type=int, default=330, help='Output image size (square)')
+    parser.add_argument('--render_scale', type=int, default=3, help='Supersampling scale factor')
+    parser.add_argument('--device', type=str, default='cpu', help='Torch device: cpu, mps, or cuda')
     args = parser.parse_args()
 
-    # Determine which parts to render
+    # Determine parts to render
     selected_ids = args.part_ids.split(',') if args.part_ids else PART_IDS
-
-    # Initialize dataset
     ds = SyntheticBrickProtoDataset(
-        obj_dir='objs',
+        obj_dir=args.obj_dir,
         part_ids=selected_ids,
         image_size=args.size,
         render_scale=args.render_scale,
@@ -189,20 +183,35 @@ if __name__ == '__main__':
         device=args.device
     )
     os.makedirs(args.out_dir, exist_ok=True)
-
-    # Number of parts for naming
     num_parts = len(selected_ids)
 
-    # Render and save with partID_viewNumber naming
+    # Render loop
     for idx in range(len(ds)):
         img, meta = ds[idx]
         mesh_idx = idx % num_parts
         view_idx = idx // num_parts + 1
         pid = selected_ids[mesh_idx]
-        img_name = f"{pid}_{view_idx:02d}.png"
-        mask_name = f"{pid}_{view_idx:02d}_mask.png"
-        vutils.save_image(img, os.path.join(args.out_dir, img_name))
-        vutils.save_image(meta['mask'].unsqueeze(0).float(),
-                          os.path.join(args.out_dir, mask_name))
 
-    print(f"Rendered {len(ds)} samples to {args.out_dir}")
+        # Save image and mask
+        img_path = os.path.join(args.out_dir, f"{pid}_{view_idx:02d}.png")
+        mask_path = os.path.join(args.out_dir, f"{pid}_{view_idx:02d}_mask.png")
+        vutils.save_image(img, img_path)
+        vutils.save_image(meta['mask'].unsqueeze(0).float(), mask_path)
+
+        # Compute tight YOLO bbox and write label
+        mask = meta['mask']  # H×W uint8
+        ys, xs = torch.nonzero(mask, as_tuple=True)
+        if ys.numel() == 0:
+            continue
+        y0, y1 = ys.min().item(), ys.max().item()
+        x0, x1 = xs.min().item(), xs.max().item()
+        W, H = args.size, args.size
+        x_center = ((x0 + x1) / 2) / W
+        y_center = ((y0 + y1) / 2) / H
+        w_norm = (x1 - x0) / W
+        h_norm = (y1 - y0) / H
+        label_path = os.path.join(args.out_dir, f"{pid}_{view_idx:02d}.txt")
+        with open(label_path, 'w') as f:
+            f.write(f"0 {x_center:.6f} {y_center:.6f} {w_norm:.6f} {h_norm:.6f}\n")
+
+    print(f"Rendered and labeled {len(ds)} samples to {args.out_dir}")
