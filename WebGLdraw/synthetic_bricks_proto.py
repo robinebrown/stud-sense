@@ -17,6 +17,10 @@ from pytorch3d.renderer import (
 )
 from torchvision.transforms import functional as F
 import torchvision.utils as vutils
+import argparse
+from pathlib import Path
+
+import config
 
 # Default list of 20 prototype part IDs
 PART_IDS = [
@@ -158,18 +162,15 @@ class SyntheticBrickProtoDataset(Dataset):
 
         return image, {'mask': mask_out}
 
-
 if __name__ == '__main__':
-    import argparse
-
     parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images, masks, and labels.")
-    parser.add_argument('--obj_dir', type=str, required=True, help='Directory of .obj files (e.g. objs)')
-    parser.add_argument('--out_dir', type=str, required=True, help='Where to save images, masks, and labels')
-    parser.add_argument('--part-ids', type=str, help='Comma-separated LDraw IDs (e.g. "3001,3020")')
+    parser.add_argument('--obj_dir', type=str, default=str(config.OBJS_DIR), help='Directory of .obj files (e.g. objs)')
+    parser.add_argument('--out_dir', type=str, default=str(config.IMAGES_DIR), help='Where to save images, masks, and labels')
+    parser.add_argument('--part-ids', type=str, default=None, help='Comma-separated LDraw IDs (e.g. "3001,3020")')
     parser.add_argument('--views_per_obj', type=int, default=5, help='How many views per part')
     parser.add_argument('--size', type=int, default=330, help='Output image size (square)')
     parser.add_argument('--render_scale', type=int, default=3, help='Supersampling scale factor')
-    parser.add_argument('--device', type=str, default='cpu', help='Torch device: cpu, mps, or cuda')
+    parser.add_argument('--device', type=str, default=config.YOLO_DEVICE, help='Torch device: cpu, mps, or cuda')
     args = parser.parse_args()
 
     # Determine parts to render
