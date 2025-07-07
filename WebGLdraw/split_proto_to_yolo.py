@@ -4,60 +4,51 @@ import sys
 import argparse
 import shutil
 import random
+from pathlib import Path
 from PIL import Image
 import numpy as np
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Split proto renders named <partID>_<view>.png into YOLO train/val datasets")
-    parser.add_argument(
-        "--renders-dir", type=str, default="viz_outputs/proto",
-        help="Directory containing rendered images <partID>_<view>.png and <partID>_<view>_mask.png")
-    parser.add_argument(
-        "--output-dir", type=str, default="yolo_dataset",
-        help="Root output directory for YOLO-formatted images/labels")
-    parser.add_argument(
-        "--train-ratio", type=float, default=0.8,
-        help="Fraction of images to use for training (rest go to validation)")
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed for shuffling")
-    args = parser.parse_args()
+import config
 
+
+def split_proto_renders(renders_dir: Path, output_dir: Path, train_ratio: float, seed: int):
+    """
+    Split prototype renders into YOLO train/validation datasets.
+    Each image <partID>_<view>.png must have a corresponding mask <partID>_<view>_mask.png.
+    """
     # Gather all rendered images (ignore masks)
     all_imgs = sorted([
-        f for f in os.listdir(args.renders_dir)
+        f for f in os.listdir(renders_dir)
         if f.endswith('.png') and not f.endswith('_mask.png')
     ])
-    random.seed(args.seed)
+
+    random.seed(seed)
     random.shuffle(all_imgs)
-    n_train = int(len(all_imgs) * args.train_ratio)
+    n_train = int(len(all_imgs) * train_ratio)
     splits = {
         'train': all_imgs[:n_train],
         'val':   all_imgs[n_train:]
     }
 
     for split, files in splits.items():
-        img_out = os.path.join(args.output_dir, 'images', split)
-        lbl_out = os.path.join(args.output_dir, 'labels', split)
-        os.makedirs(img_out, exist_ok=True)
-        os.makedirs(lbl_out, exist_ok=True)
+        img_out = output_dir / 'images' / split
+        lbl_out = output_dir / 'labels' / split
+        img_out.mkdir(parents=True, exist_ok=True)
+        lbl_out.mkdir(parents=True, exist_ok=True)
 
         for img_name in files:
-            base = os.path.splitext(img_name)[0]  # e.g., '3001_01'
-            src_img = os.path.join(args.renders_dir, img_name)
-            dst_img = os.path.join(img_out, img_name)
+            base = Path(img_name).stem
+            src_img = renders_dir / img_name
+            dst_img = img_out / img_name
             shutil.copy(src_img, dst_img)
 
-            # Corresponding mask file
             mask_name = f"{base}_mask.png"
-            mask_path = os.path.join(args.renders_dir, mask_name)
+            mask_path = renders_dir / mask_name
 
-            if not os.path.exists(mask_path):
-                print(f"Warning: missing mask for {img_name}", file=sys.stderr)
-                # fall back to full image size
-                img_size = Image.open(src_img).size  # (width, height)
-                W, H = img_size
+            # Compute bounding box
+            if not mask_path.exists():
+                # Fall back to full image
+                W, H = Image.open(src_img).size
                 xc, yc, bw, bh = 0.5, 0.5, 1.0, 1.0
             else:
                 mask = np.array(Image.open(mask_path).convert('L'))
@@ -74,11 +65,45 @@ def main():
                     xc, yc, bw, bh = 0.5, 0.5, 1.0, 1.0
 
             # Write YOLO label (class 0)
-            label_file = os.path.join(lbl_out, f"{base}.txt")
+            label_file = lbl_out / f"{base}.txt"
             with open(label_file, 'w') as f:
                 f.write(f"0 {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}\n")
 
-    print(f"Finished splitting into train/val and writing labels under '{args.output_dir}'")
+    print(f"Finished splitting into train/val under '{output_dir}'")
+
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(
+        description="Split proto renders into YOLO train/validation datasets"
+    )
+    default_renders = config.BASE_DIR / 'viz_outputs' / 'proto'
+    default_output = config.BASE_DIR / 'yolo_dataset'
+
+    parser.add_argument(
+        '--renders-dir', type=Path,
+        default=default_renders,
+        help='Directory containing rendered PNGs and masks'
+    )
+    parser.add_argument(
+        '--output-dir', type=Path,
+        default=default_output,
+        help='Root YOLO output directory'
+    )
+    parser.add_argument(
+        '--train-ratio', type=float,
+        default=0.8,
+        help='Fraction of images to use for training'
+    )
+    parser.add_argument(
+        '--seed', type=int,
+        default=42,
+        help='Random seed for shuffling'
+    )
+    args = parser.parse_args()
+
+    split_proto_renders(
+        renders_dir=args.renders_dir,
+        output_dir=args.output_dir,
+        train_ratio=args.train_ratio,
+        seed=args.seed
+    )
