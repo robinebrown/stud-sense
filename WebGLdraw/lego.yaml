@@ -1,5 +1,7 @@
-train: dataset/images/train
-val:   dataset/images/val
+path: dataset/lego_yolo
+train: images/train
+val:   images/val
+test:  images/test
 
 nc: 1
-names: [ "lego" ]
+names: ["brick"]
