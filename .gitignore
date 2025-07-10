@@ -1,2 +1,4 @@
 pytorch3d
-bricks_py310_env.yml
+bricks_py310_env.yml# ignore generated data & runs
+WebGLdraw/dataset/
+WebGLdraw/runs/
