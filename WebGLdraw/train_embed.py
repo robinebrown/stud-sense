@@ -32,12 +32,26 @@ class CanonicalBrickDataset(Dataset):
         label = self.label_to_idx[pid]
         return img, label
 
+class EmbeddingNet(nn.Module):
+    """
+    A simple embedding network based on ResNet18. Outputs a vector of dimension equal
+    to the number of canonical brick classes.
+    """
+    def __init__(self, num_classes, pretrained=True):
+        super().__init__()
+        backbone = models.resnet18(pretrained=pretrained)
+        backbone.fc = nn.Linear(backbone.fc.in_features, num_classes)
+        self.backbone = backbone
+
+    def forward(self, x):
+        return self.backbone(x)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Train an embedding network on canonical brick views.'
     )
     parser.add_argument('--data_dir', required=True, help='Path to canonical views dir')
-    parser.add_argument('--output', required=True, help='File to save trained model')
+    parser.add_argument('--output', required=True, help='File to save trained model state_dict')
     parser.add_argument('--size', type=int, default=224, help='Input image size')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=20)
@@ -45,19 +59,20 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='cuda')
     args = parser.parse_args()
 
+    # Prepare dataset and dataloader
     dataset = CanonicalBrickDataset(args.data_dir, size=args.size)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     device = torch.device(args.device)
 
-    model = models.resnet18(pretrained=True)
-    model.fc = nn.Linear(model.fc.in_features, len(dataset.labels))
-    model = model.to(device)
+    # Instantiate embedding network
+    model = EmbeddingNet(len(dataset.labels)).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    # Training loop
     for epoch in range(args.epochs):
         model.train()
-        running = 0.0
+        running_loss = 0.0
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
             outputs = model(imgs)
@@ -65,11 +80,14 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            running += loss.item()
-        print(f'Epoch {epoch+1}/{args.epochs} Loss: {running/len(loader):.4f}')
+            running_loss += loss.item()
+        avg_loss = running_loss / len(loader)
+        print(f'Epoch {epoch+1}/{args.epochs} Loss: {avg_loss:.4f}')
 
-    torch.save({
-        'state_dict': model.state_dict(),
-        'labels': dataset.labels
-    }, args.output)
-    print('Saved model to', args.output)
+    # Save the trained weights and class labels
+    torch.save(model.state_dict(), args.output)
+    labels_path = os.path.splitext(args.output)[0] + '_labels.pkl'
+    with open(labels_path, 'wb') as f:
+        torch.save(dataset.labels, f)
+    print('Saved model state_dict to', args.output)
+    print('Saved class labels to', labels_path)
