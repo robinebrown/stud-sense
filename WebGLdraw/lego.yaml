@@ -1,7 +1,8 @@
-path: dataset/lego_yolo
-train: images/train
-val:   images/val
-test:  images/test
+path: dataset/lego_yolo     # root dir for train/val splits
+train: images/train         # relative to `path`
+val:   images/val           # relative to `path`
 
-nc: 1
-names: ["brick"]
+nc: 20                       # number of classes in your prototype
+names:                       # your list of 20 part IDs as strings
+  [ "3001","3003","3020","3022","3040","54200","3665","3062","4740","15254",
+    "4865","32000","2780","3626","2555","6238","51239","88293","2817","30414" ]
