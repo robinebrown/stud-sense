@@ -14,23 +14,37 @@ import config
 
 def load_embedder(checkpoint_path: Path, device: torch.device):
     """
-    Load the trained embedder model and return the model and label list (if present).
+    Load the trained embedder model (state dict only or wrapped) and return
+    the model (with final fc replaced by Identity) and optional labels list.
     """
+    # Load checkpoint, which may be either:
+    # - a dict with keys 'state_dict' and optional 'labels'
+    # - a plain state_dict mapping param names to tensors
     ckpt = torch.load(str(checkpoint_path), map_location=device)
-    if 'labels' in ckpt:
-        labels = ckpt['labels']
+    # Determine state_dict and labels
+    if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+        state_dict = ckpt['state_dict']
+        labels = ckpt.get('labels', None)
+    elif isinstance(ckpt, dict) and all(isinstance(v, torch.Tensor) for v in ckpt.values()):
+        state_dict = ckpt
+        labels = None
+    else:
+        raise RuntimeError(f"Unrecognized checkpoint format: {checkpoint_path}")
+
+    # Infer number of classes (labels) from either labels list or state dict shape
+    if labels is not None:
         num_labels = len(labels)
     else:
-        # Infer from state dict
-        num_labels = ckpt['state_dict']['fc.weight'].shape[0]
-        labels = None
+        # fc.weight shape: [num_classes, feat_dim]
+        num_labels = state_dict['fc.weight'].shape[0]
 
+    # Build model and load weights
     model = torch.hub.load('pytorch/vision', 'resnet18', pretrained=False)
     model.fc = torch.nn.Linear(model.fc.in_features, num_labels)
-    model.load_state_dict(ckpt['state_dict'])
-    # Remove classification head
+    model.load_state_dict(state_dict)
+    # Remove classification head for embedding
     model.fc = torch.nn.Identity()
-    model.to(device).eval()
+    model = model.to(device).eval()
     return model, labels
 
 
@@ -45,7 +59,6 @@ def build_faiss_index(
     """
     resize = Resize((config.EMBED_BATCH_SIZE, config.EMBED_BATCH_SIZE))
     items = []
-    # Find all canonical images (ignore masks)
     for img_path in canonical_dir.glob("*.png"):
         if img_path.stem.endswith('_mask'):
             continue
@@ -78,7 +91,7 @@ def main():
     parser.add_argument(
         '--embedder', type=Path,
         default=config.EMBEDDER_SCRIPTED,
-        help='Path to the scripted embedder (.pt or .pth)'
+        help='Path to the embedder checkpoint (state_dict or wrapped)'
     )
     parser.add_argument(
         '--canonical-dir', type=Path,
@@ -106,14 +119,12 @@ def main():
     embedder, labels = load_embedder(args.embedder, device)
     index, part_ids = build_faiss_index(embedder, args.canonical_dir, device)
 
-    # Save index and labels
     args.output_index.parent.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(args.output_index))
     with open(args.output_labels, 'wb') as f:
         pickle.dump(part_ids, f)
 
     print(f"Wrote FAISS index to {args.output_index} and labels to {args.output_labels}")
-
 
 if __name__ == '__main__':
     main()
