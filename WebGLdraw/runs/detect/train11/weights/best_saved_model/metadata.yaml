@@ -1,0 +1,40 @@
+description: Ultralytics YOLO11n model trained on lego.yaml
+author: Ultralytics
+date: '2025-07-11T14:17:19.370782'
+version: 8.3.164
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 512
+- 512
+names:
+  0: '3001'
+  1: '3003'
+  2: '3020'
+  3: '3022'
+  4: '3040'
+  5: '54200'
+  6: '3665'
+  7: '3062'
+  8: '4740'
+  9: '15254'
+  10: '4865'
+  11: '32000'
+  12: '2780'
+  13: '3626'
+  14: '2555'
+  15: '6238'
+  16: '51239'
+  17: '88293'
+  18: '2817'
+  19: '30414'
+args:
+  batch: 1
+  fraction: 1.0
+  half: false
+  int8: false
+  nms: false
+channels: 3
