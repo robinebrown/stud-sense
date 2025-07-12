@@ -30,6 +30,13 @@ def load_embedder(checkpoint_path: Path, device: torch.device):
         labels = None
     else:
         raise RuntimeError(f"Unrecognized checkpoint format: {checkpoint_path}")
+     #── Handle EmbeddingNet’s “backbone.” prefix so keys match torchvision ResNet18 ──#
+    if any(k.startswith('backbone.') for k in state_dict.keys()):
+     # strip off "backbone." from every key
+     state_dict = {
+         k[len('backbone.'):]: v
+         for k, v in state_dict.items()
+     }
 
     # Infer number of classes (labels) from either labels list or state dict shape
     if labels is not None:
@@ -80,6 +87,9 @@ def build_faiss_index(
 
     features = np.vstack(features).astype('float32')
     ids = np.array(ids, dtype='int64')
+    # ─── L2-normalize each feature vector ───
+    norms    = np.linalg.norm(features, axis=1, keepdims=True)
+    features = features / norms
     dim = features.shape[1]
     index = faiss.IndexIDMap(faiss.IndexFlatL2(dim))
     index.add_with_ids(features, ids)
@@ -128,3 +138,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

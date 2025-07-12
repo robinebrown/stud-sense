@@ -54,9 +54,14 @@ def detect_and_retrieve_py(
     x = emb_pre(crop).unsqueeze(0).to(device_t)
     with torch.no_grad():
         feat = embed_model(x).cpu().numpy()
+    # ─── L2-normalize query before FAISS search ───
+    feat = feat / np.linalg.norm(feat, axis=1, keepdims=True)
     # 6) FAISS lookup
-    _, I = index.search(feat, 1)
-    pid = labels[I[0][0]]
+    D, I = index.search(feat, 5)              # get distances & indices of top 5
+    print("Top-5 FAISS matches:")
+    for dist, idx in zip(D[0], I[0]):
+        print(f"  ID {labels[idx]} @ dist {dist:.4f}")
+    pid = labels[I[0][0]]                     # still pick the top-1 for the demo
     print(f"Detected box {box.tolist()} → Part ID: {pid}")
 
 if __name__=="__main__":
