@@ -3,6 +3,7 @@ import os
 import torch
 from torch import nn
 from torchvision import models, transforms
+from torchvision.models import ResNet18_Weights
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import argparse
@@ -18,8 +19,13 @@ class CanonicalBrickDataset(Dataset):
         self.labels = sorted({pid for _, pid in self.items})
         self.label_to_idx = {pid: idx for idx, pid in enumerate(self.labels)}
         self.transform = transforms.Compose([
-            transforms.Resize((size, size)),
+            # augmentations for robustness
+            transforms.RandomResizedCrop(size),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
             transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
         ])
 
     def __len__(self):
@@ -37,9 +43,9 @@ class EmbeddingNet(nn.Module):
     A simple embedding network based on ResNet18. Outputs a vector of dimension equal
     to the number of canonical brick classes.
     """
-    def __init__(self, num_classes, pretrained=True):
+    def __init__(self, num_classes):
         super().__init__()
-        backbone = models.resnet18(pretrained=pretrained)
+        backbone = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
         backbone.fc = nn.Linear(backbone.fc.in_features, num_classes)
         self.backbone = backbone
 

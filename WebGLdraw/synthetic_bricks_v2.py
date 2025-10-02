@@ -14,7 +14,7 @@ from pytorch3d.renderer import (
     DirectionalLights,
     TexturesVertex
 )
-from torchvision.transforms import functional as F
+from torchvision.transforms.v2 import functional as F
 import torchvision.utils as vutils
 
 # Default list of 20 prototype part IDs
@@ -28,30 +28,37 @@ class SyntheticBrickProtoDataset(Dataset):
     Dataset for rendering a fixed set of prototype parts in light gray.
     """
     def __init__(self,
-                 obj_dir,
-                 part_ids,
-                 image_size=330,
-                 render_scale=3,
-                 views_per_obj=5,
-                 device="cpu",
+                 obj_dir, # default; argument --obj_dir "point to directory containing .obj files"
+                 part_ids, # default; argument --part_ids "real part ID"
+                 image_size=330, # default; argument --image_size "pixel size numerical [squared]"
+                 render_scale=3, # default; argument --render_scale "numerical <20"
+                 views_per_obj=5, # default; argument --views_per_obj "numerical <5000"
+                 device="cpu", # default; argument --device """ for CUDA
                  camera_scale=2.5,
                  fov=60.0):
+        # Use Z-up for typical OBJ assets; change to Y-up if your models are Y-up.
+        UP_Z = ((0.0, 0.0, 1.0),)
         self.device = torch.device(device)
         self.image_size = image_size
         self.render_size = image_size * render_scale
         self.views_per_obj = views_per_obj
         self.camera_scale = camera_scale
         self.fov = fov
+        self.up = UP_Z
 
         # Build full paths to each part's .obj
         self.mesh_paths = [os.path.join(obj_dir, f"{pid}.obj") for pid in part_ids]
-        print(f"→ Prototype parts: {len(self.mesh_paths)} meshes from {obj_dir}")
+        print(f"Prototype parts: {len(self.mesh_paths)} meshes from {obj_dir}")
 
         # Load meshes
         self.meshes = load_objs_as_meshes(self.mesh_paths, device=self.device)
+
+        # Precompute centers and radii for each mesh
+        self.centers = []
         self.radii = []
         for verts in self.meshes.verts_list():
             center = verts.mean(0, keepdim=True)
+            self.centers.append(center.squeeze(0))  # store [3]
             self.radii.append(((verts - center).norm(dim=1)).max().item())
 
         # Assign constant light gray vertex color
@@ -67,6 +74,8 @@ class SyntheticBrickProtoDataset(Dataset):
             blur_radius=0.0,
             faces_per_pixel=1
         )
+        
+        # directional lighting
         lights = DirectionalLights(
             device=self.device,
             direction=[[0.0, 0.0, -1.0]],
@@ -86,18 +95,29 @@ class SyntheticBrickProtoDataset(Dataset):
         mesh_idx = idx % len(self.mesh_paths)
         mesh = self.meshes[mesh_idx]
         rad = self.radii[mesh_idx]
+        center = self.centers[mesh_idx]
 
         # Random camera pose
         half = math.radians(self.fov / 2)
         dist = rad * self.camera_scale / math.tan(half)
         azim = random.uniform(0, 360)
         elev = random.uniform(-75, 75)
-        R, T = look_at_view_transform(dist, elev, azim, device=self.device)
+
+        # IMPORTANT: pass at=center and up=self.up so "up" is correct and camera looks at the mesh
+        R, T = look_at_view_transform(
+            dist=dist,
+            elev=elev,
+            azim=azim,
+            at=center[None, :],
+            up=self.up,
+            degrees=True,
+            device=self.device
+        )
         cam = FoVPerspectiveCameras(device=self.device, fov=self.fov, R=R, T=T)
         self.renderer.rasterizer.cameras = cam
         self.renderer.shader.cameras = cam
 
-        # Align headlight
+        # Align headlight with camera forward
         cam_to_world = R[0].T
         dir_cam = torch.tensor([0.0, 0.0, -1.0], device=self.device,
                                dtype=cam_to_world.dtype).view(1, 3)
@@ -142,7 +162,7 @@ class SyntheticBrickProtoDataset(Dataset):
         crop = F.pad(crop, pad, fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), pad, fill=0).squeeze(0)
 
-        # === Add extra 20px border padding ===
+        # === Add extra border padding ===
         border = 45
         crop = F.pad(crop, (border, border, border, border), fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), (border, border, border, border), fill=0).squeeze(0)
@@ -164,11 +184,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images and masks.")
     parser.add_argument('--part-ids', type=str,
                         help='Comma-separated list of LDraw IDs to render (e.g. "3001,3020,3626").')
-    parser.add_argument('--views_per_obj', type=int, default=1,
+    parser.add_argument('--views_per_obj', type=int, default=20,
                         help='How many random views to render per part (default=1).')
     parser.add_argument('--size', type=int, default=330,
                         help='Output image size in pixels (square, default=330).')
-    parser.add_argument('--render_scale', type=int, default=3,
+    parser.add_argument('--render_scale', type=int, default=4,
                         help='Supersampling scale factor for rendering (default=3).')
     parser.add_argument('--device', type=str, default='cpu',
                         help='Torch device to use (cpu or cuda, default=cpu).')

@@ -1,233 +1,213 @@
+// DATParser.js
 var DATParser = (function () {
   "use strict";
 
-  // Node.js support for reading .dat files from disk
+  // ─── Node.js support for reading .dat files from disk ─────────────────
   var fs   = (typeof require === 'function') ? require('fs') : null;
   var path = (typeof require === 'function') ? require('path') : null;
 
-  // Cache for browser fallback
-  var dataCache = {};
-
-  // Build an index of all .dat files under the 'parts' directory for fast lookup
+  // ─── Build index of all .dat files under parts/ldraw ────────────────────
   var datIndex = {};
-  if (fs) {
-    var partsRoot = path.join(__dirname, 'parts');
-    function indexDir(dir) {
-      fs.readdirSync(dir).forEach(function(name) {
-        var full = path.join(dir, name);
-        var stat = fs.statSync(full);
-        if (stat.isDirectory()) {
-          indexDir(full);
-        } else if (name.toLowerCase().endsWith('.dat')) {
-          datIndex[name.toLowerCase()] = full;
+  if (fs && path) {
+    var partsRoot = path.join(__dirname, 'parts', 'ldraw');
+    function walk(dir) {
+      fs.readdirSync(dir, { withFileTypes: true }).forEach(function (entry) {
+        var full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.dat')) {
+          datIndex[entry.name.toLowerCase()] = full;
         }
       });
     }
-    if (fs.existsSync(partsRoot) && fs.statSync(partsRoot).isDirectory()) {
-      indexDir(partsRoot);
+    try {
+      walk(partsRoot);
+    } catch (e) {
+      console.warn("DATParser: couldn't walk parts/ldraw:", e.message);
     }
   }
 
-  /**
-   * Get the data for a .dat file, using our prebuilt index
-   */
-  var getDATFile = function(filename) {
-    // 1) Strip surrounding quotes
-    var fn = filename.replace(/^['\"]+|['\"]+$/g, '');
-    // 2) Normalize backslashes to forward slashes
-    var norm = fn.replace(/\\/g, '/');
-    // 3) Base filename lowercased
-    var base = path.basename(norm).toLowerCase();
+  // ─── Cache for browser fallback ───────────────────────────────────────────
+  var dataCache = {};
 
+  // ─── Load a DAT by filename (may return empty string on missing) ──────────
+  function getDATFile(filename) {
+    var name = filename.replace(/\\/g, '/');
+    var base = path.basename(name).toLowerCase();
+
+    // Node.js: lookup in index
     if (fs) {
-      // 4) Indexed lookup
-      if (datIndex[base]) {
-        return fs.readFileSync(datIndex[base], 'utf8');
+      var full = datIndex[base] || '';
+      if (!full) {
+        console.warn("DATParser: file not found:", filename, "(skipping)");
+        return "";
       }
-      // 5) Flattened slash variant: 's/50956s01.dat' -> 's50956s01.dat'
-      if (norm.includes('/')) {
-        var flat = norm.split('/').join('').toLowerCase();
-        if (datIndex[flat]) {
-          return fs.readFileSync(datIndex[flat], 'utf8');
-        }
-      }
-      // 6) Direct file path fallback
-      if (fs.existsSync(norm) && fs.statSync(norm).isFile()) {
-        return fs.readFileSync(norm, 'utf8');
-      }
-      throw new Error('DATParser: file not found: ' + filename);
+      return fs.readFileSync(full, 'utf8');
     }
 
     // Browser fallback via synchronous XHR
     if (!dataCache[filename]) {
       var xhr = new XMLHttpRequest();
-      xhr.open('GET', filename, false);
+      xhr.open("GET", filename, false);
       xhr.send(null);
-      if (xhr.status === 200 && xhr.responseText.trim() !== '') {
-        dataCache[filename] = xhr.responseText;
-      } else {
-        throw new Error('DATParser (XHR) could not load ' + filename);
+      if (!xhr.responseText.trim()) {
+        xhr.open("GET", "./parts/ldraw/parts/" + base, false);
+        xhr.send(null);
+        if (!xhr.responseText.trim()) {
+          throw "DATParser: " + base + " was empty!";
+        }
       }
+      dataCache[filename] = xhr.responseText;
     }
     return dataCache[filename];
-  };
+  }
 
-  /**
-   * Cast a string to float
-   */
-  var castFloat = function(v) { return parseFloat(v); };
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+  function castFloat(v) { return parseFloat(v); }
 
-  // Unique mesh ID generator
   var uid = 1;
-
-  /**
-   * Build a new mesh object for collecting vertices and faces.
-   */
-  var buildMesh = function() {
+  function buildMesh() {
     return {
       meshId: uid++,
       vertices: [],
       faces: [],
-      addVertex: function(x, y, z, c) {
-        this.vertices.push({x: x, y: y, z: z, color: c});
+      addVertex: function (x, y, z, c) {
+        this.vertices.push({ x: x, y: y, z: z, color: c });
       },
-      addFace: function(m, c, clockwise, inverted) {
-        var v1 = this.vertices.length;
-        this.addVertex(m[0], m[1], m[2], c);
-        var v2 = this.vertices.length;
-        this.addVertex(m[3], m[4], m[5], c);
-        var v3 = this.vertices.length;
-        this.addVertex(m[6], m[7], m[8], c);
-        var normal = (clockwise && inverted) || (!clockwise && !inverted);
-        this.faces.push({v1: v1, v2: (normal ? v2 : v3), v3: (normal ? v3 : v2)});
+      addFace: function (m, c, cw, inv) {
+        var v1 = this.vertices.length; this.addVertex(m[0], m[1], m[2], c);
+        var v2 = this.vertices.length; this.addVertex(m[3], m[4], m[5], c);
+        var v3 = this.vertices.length; this.addVertex(m[6], m[7], m[8], c);
+        var flip = (cw && inv) || (!cw && !inv);
+        this.faces.push({ v1: v1, v2: flip ? v2 : v3, v3: flip ? v3 : v2 });
       },
-      addQuad: function(m, c, clockwise, inverted) {
-        var v1 = this.vertices.length;
-        this.addVertex(m[0], m[1], m[2], c);
-        var v2 = this.vertices.length;
-        this.addVertex(m[3], m[4], m[5], c);
-        var v3 = this.vertices.length;
-        this.addVertex(m[6], m[7], m[8], c);
-        var v4 = this.vertices.length;
-        this.addVertex(m[9], m[10], m[11], c);
-        var normal = (clockwise && inverted) || (!clockwise && !inverted);
-        this.faces.push({v1: v1, v2: (normal ? v2 : v3), v3: (normal ? v3 : v2)});
-        this.faces.push({v1: v3, v2: (normal ? v4 : v1), v3: (normal ? v1 : v4)});
+      addQuad: function (m, c, cw, inv) {
+        var v1 = this.vertices.length; this.addVertex(m[0], m[1], m[2], c);
+        var v2 = this.vertices.length; this.addVertex(m[3], m[4], m[5], c);
+        var v3 = this.vertices.length; this.addVertex(m[6], m[7], m[8], c);
+        var v4 = this.vertices.length; this.addVertex(m[9], m[10], m[11], c);
+        var flip = (cw && inv) || (!cw && !inv);
+        this.faces.push({ v1: v1, v2: flip ? v2 : v3, v3: flip ? v3 : v2 });
+        this.faces.push({ v1: v3, v2: flip ? v4 : v1, v3: flip ? v1 : v4 });
       },
-      apply: function(offset, mat, color) {
-        this.vertices.forEach(function(v) {
-          var x = mat[0] * v.x + mat[1] * v.y + mat[2] * v.z + offset[0];
-          var y = mat[3] * v.x + mat[4] * v.y + mat[5] * v.z + offset[1];
-          var z = mat[6] * v.x + mat[7] * v.y + mat[8] * v.z + offset[2];
+      apply: function (c, m, color) {
+        this.vertices.forEach(function (v) {
+          var x = m[0]*v.x + m[1]*v.y + m[2]*v.z + c[0];
+          var y = m[3]*v.x + m[4]*v.y + m[5]*v.z + c[1];
+          var z = m[6]*v.x + m[7]*v.y + m[8]*v.z + c[2];
           v.x = x; v.y = y; v.z = z; v.color = color;
         });
       }
     };
-  };
+  }
 
-  /**
-   * Parser for .dat instructions
-   */
-  var Parser = function(inverted, consolePrefix) {
+  // ─── Parser ──────────────────────────────────────────────────────────────
+  function Parser(inverted, prefix) {
     this.invertNext = false;
-    this.clockwise = false;
-    this.invert = inverted;
-    this.consolePrefix = consolePrefix || '';
-  };
+    this.clockwise  = false;
+    this.invert     = inverted;
+    this.consolePrefix = prefix || "";
+  }
 
   Parser.prototype = {
-    log: (console && console.log) ? function(s) { console.log(this.consolePrefix + s); } : function() {},
-    handleBFC: function(ops) {
-      ops.forEach(function(op) {
-        if (op === 'CW') this.clockwise = true;
-        if (op === 'CCW') this.clockwise = false;
-        if (op === 'INVERTNEXT') this.invertNext = true;
-      }.bind(this));
+    log: function (s) { console.log(this.consolePrefix + s); },
+    handleBFC: function (ops) {
+      ops.forEach(function (op) {
+        if (op === "CW")        this.clockwise = true;
+        if (op === "CCW")       this.clockwise = false;
+        if (op === "INVERTNEXT") this.invertNext = true;
+      }, this);
     },
-    handleComment: function(ops) {
-      if (ops[0] === 'BFC') { ops.shift(); this.handleBFC(ops); }
+    handleComment: function (ops) {
+      if (ops[0] === "BFC") {
+        ops.shift();
+        this.handleBFC(ops);
+      }
     },
-    handleDependency: function(ops, meshes) {
+    handleDependency: function (ops, meshes) {
       var dep = ops.pop();
-      ops = ops.map(castFloat);
-      var det = (function(m) {
-        return m[0] * (m[4] * m[8] - m[7] * m[5])
-             - m[3] * (m[1] * m[8] - m[7] * m[2])
-             + m[6] * (m[1] * m[5] - m[4] * m[2]);
-      })(ops.slice(4, 13));
-      var inv = this.invert;
-      if (this.invertNext) inv = !inv;
+      var nums = ops.map(castFloat);
+      var det = (function (m) {
+        return m[0]*(m[4]*m[8] - m[7]*m[5])
+             - m[3]*(m[1]*m[8] - m[7]*m[2])
+             + m[6]*(m[1]*m[5] - m[4]*m[2]);
+      })(nums.slice(4, 13));
+      var inv = this.invertNext ? !this.invert : this.invert;
       if (det < 0) inv = !inv;
       this.invertNext = false;
-      var childParser = new Parser(inv, this.consolePrefix);
-      var childMeshes = childParser.parseFile(dep);
-      childMeshes.forEach(function(mesh) {
-        mesh.apply(ops.slice(1, 4), ops.slice(4, 13), ops[0]);
-        meshes.push(mesh);
+      var child = new Parser(inv, this.consolePrefix);
+      var childMeshes = child.parseFile(dep);
+      childMeshes.forEach(function (m) {
+        m.apply(nums.slice(1,4), nums.slice(4,13), nums[0]);
+        meshes.push(m);
       });
     },
-    parseTriangle: function(args, mesh) {
+    parseTriangle: function (args, mesh) {
       var a = args.map(castFloat);
       mesh.addFace(a.slice(1), a[0], this.clockwise, this.invert);
     },
-    parseQuad: function(args, mesh) {
+    parseQuad: function (args, mesh) {
       var a = args.map(castFloat);
       mesh.addQuad(a.slice(1), a[0], this.clockwise, this.invert);
     },
-    parseInstruction: function(line, meshes) {
-      var cur = meshes[meshes.length - 1];
-      if (!line.trim() && cur.vertices.length) { meshes.push(buildMesh()); return; }
-      var ops = line.trim().split(/\s+/);
-      var op = ops.shift();
-      if (op === '0') this.handleComment(ops);
-      else if (op === '1') this.handleDependency(ops, meshes);
-      else if (op === '3') this.parseTriangle(ops, cur);
-      else if (op === '4') this.parseQuad(ops, cur);
+    parseInstruction: function (line, meshes) {
+      var curr = meshes[meshes.length-1];
+      if (!line.trim() && curr.vertices.length) {
+        meshes.push(buildMesh());
+        return;
+      }
+      var parts = line.trim().split(/\s+/);
+      var code  = parts.shift();
+      if (code === '0') this.handleComment(parts);
+      else if (code === '1') this.handleDependency(parts, meshes);
+      else if (code === '3') this.parseTriangle(parts, curr);
+      else if (code === '4') this.parseQuad(parts, curr);
     },
-    parse: function(filename, data) {
-      this.log(' * parsing ' + filename);
+    parse: function (fn, data) {
+      this.log(" * parsing " + fn);
       var lines = data.split(/\r?\n/);
       var meshes = [buildMesh()];
-      lines.forEach(function(ln) { this.parseInstruction(ln, meshes); }.bind(this));
-      if (!meshes[meshes.length - 1].vertices.length) meshes.pop();
+      lines.forEach(function (ln) { this.parseInstruction(ln, meshes); }, this);
+      if (!meshes[meshes.length-1].vertices.length) meshes.pop();
       return meshes;
     },
-    parseFile: function(filename) {
-      var data = getDATFile(filename);
-      return this.parse(filename, data);
+    parseFile: function (fn) {
+      var txt = getDATFile(fn);
+      return this.parse(fn, txt);
     },
-    toOBJ: function(meshData, scale) {
+    toOBJ: function (meshData, scale) {
       scale = scale || 0.05;
-      var nl = '\n';
-      var obj = ['# LDraw .dat to OBJ'];
-      var verts = ['# vertices:'];
-      var faces = ['# faces:'];
-      var offset = 1;
-      var prec = 6;
-      var nf = (function(p) { var m = Math.pow(10, p); return function(v) { return ((v * m) | 0) / m; }; }(prec));
-      meshData.forEach(function(mesh) {
-        if (!mesh.vertices.length) return;
-        verts.push('', '# mesh ' + mesh.meshId);
-        mesh.vertices.forEach(function(v) {
-          verts.push('v ' + nf(v.x * scale) + ' ' + nf(v.y * scale) + ' ' + nf(v.z * scale));
+      var nl = "\n", obj = ["# LDraw⟶OBJ"], verts = ["# verts"], faces = ["# faces"], off = 1;
+      meshData.forEach(function (m) {
+        if (!m.vertices.length) return;
+        verts.push("", "# mesh" + m.meshId);
+        m.vertices.forEach(function (v) {
+          verts.push(
+            "v " +
+            (v.x*scale).toFixed(6) + " " +
+            (v.y*scale).toFixed(6) + " " +
+            (v.z*scale).toFixed(6)
+          );
         });
-        faces.push('g mesh' + mesh.meshId);
-        faces.push('usemtl color' + mesh.vertices[0].color);
-        faces.push('s 1', '');
-        mesh.faces.forEach(function(f) {
-          faces.push('f ' + (f.v1 + offset) + ' ' + (f.v2 + offset) + ' ' + (f.v3 + offset));
+        faces.push("", "g mesh" + m.meshId, "s 1");
+        m.faces.forEach(function (f) {
+          faces.push(
+            "f " +
+            (f.v1 + off) + "// " +
+            (f.v2 + off) + "// " +
+            (f.v3 + off) + "//"
+          );
         });
-        offset += mesh.vertices.length;
-        faces.push('');
+        off += m.vertices.length;
       });
-      return obj.concat([''], verts, [''], faces).join(nl);
+      return obj.concat([""], verts, [""], faces).join(nl);
     }
   };
 
   return new Parser();
 }());
 
-// Export for Node.js
+// ─── Node.js export ──────────────────────────────────────────────
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = DATParser;
 }
