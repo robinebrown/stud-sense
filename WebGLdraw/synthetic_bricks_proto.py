@@ -14,8 +14,9 @@ from pytorch3d.renderer import (
     DirectionalLights,
     TexturesVertex
 )
+from pytorch3d.structures import join_meshes_as_batch
 from torchvision.transforms.v2 import functional as F
-import torchvision.utils as vutils
+from torchvision.io import write_png
 
 # Default list of 20 prototype part IDs
 PART_IDS = [
@@ -25,19 +26,21 @@ PART_IDS = [
 
 class SyntheticBrickProtoDataset(Dataset):
     """
-    Dataset for rendering a fixed set of prototype parts in light gray.
+    Dataset holding meshes, centers, radii, renderer, and utilities.
+    Rendering is batched in the main loop for speed.
     """
     def __init__(self,
-                 obj_dir, # default; argument --obj_dir "point to directory containing .obj files"
-                 part_ids, # default; argument --part_ids "real part ID"
-                 image_size=330, # default; argument --image_size "pixel size numerical [squared]"
-                 render_scale=3, # default; argument --render_scale "numerical <20"
-                 views_per_obj=5, # default; argument --views_per_obj "numerical <5000"
-                 device="cpu", # default; argument --device """ for CUDA
+                 obj_dir,
+                 part_ids,
+                 image_size=330,
+                 render_scale=3,
+                 views_per_obj=5,
+                 device="cpu",
                  camera_scale=2.5,
                  fov=60.0):
-        # Use Z-up for typical OBJ assets; change to Y-up if your models are Y-up.
+        # World up: OBJs are often Z-up; change to Y-up if needed
         UP_Z = ((0.0, 0.0, 1.0),)
+
         self.device = torch.device(device)
         self.image_size = image_size
         self.render_size = image_size * render_scale
@@ -50,15 +53,15 @@ class SyntheticBrickProtoDataset(Dataset):
         self.mesh_paths = [os.path.join(obj_dir, f"{pid}.obj") for pid in part_ids]
         print(f"Prototype parts: {len(self.mesh_paths)} meshes from {obj_dir}")
 
-        # Load meshes
+        # Load meshes on device
         self.meshes = load_objs_as_meshes(self.mesh_paths, device=self.device)
 
-        # Precompute centers and radii for each mesh
+        # Precompute centers and radii
         self.centers = []
         self.radii = []
         for verts in self.meshes.verts_list():
             center = verts.mean(0, keepdim=True)
-            self.centers.append(center.squeeze(0))  # store [3]
+            self.centers.append(center.squeeze(0))  # [3]
             self.radii.append(((verts - center).norm(dim=1)).max().item())
 
         # Assign constant light gray vertex color
@@ -67,16 +70,15 @@ class SyntheticBrickProtoDataset(Dataset):
                  for v in self.meshes.verts_list()]
         self.meshes.textures = TexturesVertex(verts_features=feats)
 
-        # Renderer: headlight only
-        self.cameras = FoVPerspectiveCameras(device=self.device, fov=self.fov)
+        # Renderer
+        self.base_cameras = FoVPerspectiveCameras(device=self.device, fov=self.fov)
         rast = RasterizationSettings(
             image_size=self.render_size,
             blur_radius=0.0,
             faces_per_pixel=1
         )
-        
-        # directional lighting
-        lights = DirectionalLights(
+        # Keep lights object; we will update its direction per batch
+        self.lights = DirectionalLights(
             device=self.device,
             direction=[[0.0, 0.0, -1.0]],
             ambient_color=[[0.1, 0.1, 0.1]],
@@ -84,122 +86,156 @@ class SyntheticBrickProtoDataset(Dataset):
             specular_color=[[0.3, 0.3, 0.3]]
         )
         self.renderer = MeshRenderer(
-            MeshRasterizer(cameras=self.cameras, raster_settings=rast),
-            SoftPhongShader(device=self.device, cameras=self.cameras, lights=lights)
+            MeshRasterizer(cameras=self.base_cameras, raster_settings=rast),
+            SoftPhongShader(device=self.device, cameras=self.base_cameras, lights=self.lights)
         )
 
     def __len__(self):
         return len(self.mesh_paths) * self.views_per_obj
 
-    def __getitem__(self, idx):
-        mesh_idx = idx % len(self.mesh_paths)
-        mesh = self.meshes[mesh_idx]
-        rad = self.radii[mesh_idx]
-        center = self.centers[mesh_idx]
+    # ---- Batched utilities ----
 
-        # Random camera pose
+    def sample_azim_elev(self, n):
+        # Avoid poles to reduce roll ambiguity
+        elev = torch.empty(n, device=self.device).uniform_(-75.0, 75.0)
+        azim = torch.empty(n, device=self.device).uniform_(0.0, 360.0)
+        return azim, elev
+
+    def distance_for_mesh(self, mesh_idx):
         half = math.radians(self.fov / 2)
-        dist = rad * self.camera_scale / math.tan(half)
-        azim = random.uniform(0, 360)
-        elev = random.uniform(-75, 75)
+        dist = self.radii[mesh_idx] * self.camera_scale / math.tan(half)
+        return float(dist)
 
-        # IMPORTANT: pass at=center and up=self.up so "up" is correct and camera looks at the mesh
+    def render_batch_views(self, mesh_idx, azim_deg, elev_deg):
+        """
+        Render a batch of views for a single mesh index.
+        azim_deg, elev_deg: 1D tensors on device with same length N.
+        Returns:
+          imgs: [N, H, W, 3] float tensor in [0,1] on device
+          masks: [N, H, W] uint8 tensor (0/1) on device
+        """
+        mesh = self.meshes[mesh_idx]
+        center = self.centers[mesh_idx].unsqueeze(0)  # [1,3]
+        N = azim_deg.shape[0]
+
+        # Dist can be scalar; broadcast by PyTorch3D
+        dist = self.distance_for_mesh(mesh_idx)
+
+        # Cameras for batch
         R, T = look_at_view_transform(
             dist=dist,
-            elev=elev,
-            azim=azim,
-            at=center[None, :],
+            elev=elev_deg,
+            azim=azim_deg,
+            at=center.repeat(N, 1),
             up=self.up,
             degrees=True,
             device=self.device
         )
-        cam = FoVPerspectiveCameras(device=self.device, fov=self.fov, R=R, T=T)
-        self.renderer.rasterizer.cameras = cam
-        self.renderer.shader.cameras = cam
+        cameras = FoVPerspectiveCameras(device=self.device, fov=self.fov, R=R, T=T)
+        # Update renderer cameras
+        self.renderer.rasterizer.cameras = cameras
+        self.renderer.shader.cameras = cameras
 
-        # Align headlight with camera forward
-        cam_to_world = R[0].T
-        dir_cam = torch.tensor([0.0, 0.0, -1.0], device=self.device,
-                               dtype=cam_to_world.dtype).view(1, 3)
-        world_dir = (dir_cam @ cam_to_world).view(1, 3).tolist()
-        self.renderer.shader.lights = DirectionalLights(
-            device=self.device,
-            direction=world_dir,
-            ambient_color=[[0.1, 0.1, 0.1]],
-            diffuse_color=[[0.8, 0.8, 0.8]],
-            specular_color=[[0.3, 0.3, 0.3]]
-        )
+        # Headlight alignment (batched): camera forward (0,0,-1) in cam → world
+        # cam_to_world = R^T; for batch we can multiply by vector
+        cam_to_world = R.transpose(1, 2)  # [N,3,3]
+        dir_cam = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=cam_to_world.dtype).view(1, 3, 1)
+        world_dir = torch.bmm(cam_to_world, dir_cam).squeeze(-1)  # [N,3]
+        # Normalize (defensive)
+        world_dir = torch.nn.functional.normalize(world_dir, dim=1)
+        # Update lights direction (batched)
+        self.lights.direction = world_dir
 
-        # Render and get mask
-        out = self.renderer(mesh, R=R, T=T)
-        img = out[0, ..., :3]  # [H, W, 3]
-        frags = self.renderer.rasterizer(mesh, R=R, T=T)
-        mask = (frags.pix_to_face[..., 0] >= 0).squeeze(0).to(torch.uint8)
+        # Duplicate mesh N times into a batch
+        mesh_batch = join_meshes_as_batch([mesh] * N)
+        # Render
+        out = self.renderer(mesh_batch, R=R, T=T)[..., :3]  # [N,H,W,3]
 
-        # Composite gray over black
-        comp = img * mask.unsqueeze(-1).float()
+        # Fragments for mask
+        frags = self.renderer.rasterizer(mesh_batch, R=R, T=T)
+        mask = (frags.pix_to_face[..., 0] >= 0).to(torch.uint8)  # [N,H,W]
 
-        # Crop to mask bounds + margin
-        ys, xs = torch.nonzero(mask, as_tuple=True)
-        H, W = mask.shape
+        return out, mask
+
+    @staticmethod
+    def _crop_square_with_border(img_chw, mask_hw, border_px=45):
+        """
+        Per-sample crop to tight bbox, pad to square, then add border.
+        img_chw: [3,H,W] float
+        mask_hw: [H,W] uint8
+        Returns [3,H',W'], [H',W'] on same device.
+        """
+        ys, xs = torch.nonzero(mask_hw, as_tuple=True)
+        H, W = mask_hw.shape
         if ys.numel():
             m = 16
-            y0, y1 = max(0, ys.min().item() - m), min(H, ys.max().item() + m)
-            x0, x1 = max(0, xs.min().item() - m), min(W, xs.max().item() + m)
+            y0 = max(0, int(ys.min().item()) - m)
+            y1 = min(H, int(ys.max().item()) + m)
+            x0 = max(0, int(xs.min().item()) - m)
+            x1 = min(W, int(xs.max().item()) + m)
         else:
             y0, y1, x0, x1 = 0, 1, 0, 1
-        crop = comp[y0:y1, x0:x1, :].permute(2, 0, 1)
-        mask_crop = mask[y0:y1, x0:x1]
+
+        crop = img_chw[:, y0:y1, x0:x1]
+        mask_crop = mask_hw[y0:y1, x0:x1]
 
         # Pad to square
-        c, h, w = crop.shape
+        _, h, w = crop.shape
         if h > w:
             diff = h - w
-            pad = (diff // 2, 0, diff - diff // 2, 0)
+            pad = (diff // 2, 0, diff - diff // 2, 0)  # (left, right, top, bottom)
         else:
             diff = w - h
             pad = (0, diff // 2, 0, diff - diff // 2)
+
         crop = F.pad(crop, pad, fill=0)
         mask_crop = F.pad(mask_crop.unsqueeze(0), pad, fill=0).squeeze(0)
 
-        # === Add extra border padding ===
-        border = 45
-        crop = F.pad(crop, (border, border, border, border), fill=0)
-        mask_crop = F.pad(mask_crop.unsqueeze(0), (border, border, border, border), fill=0).squeeze(0)
+        # Extra border
+        b = border_px
+        crop = F.pad(crop, (b, b, b, b), fill=0)
+        mask_crop = F.pad(mask_crop.unsqueeze(0), (b, b, b, b), fill=0).squeeze(0)
 
-        # Downsample
-        image = F.resize(crop, [self.image_size, self.image_size])
-        mask_out = F.resize(
-            mask_crop.unsqueeze(0).float(),
-            [self.image_size, self.image_size],
-            interpolation=F.InterpolationMode.NEAREST
-        )[0].to(torch.uint8)
+        return crop, mask_crop
 
-        return image, {'mask': mask_out}
+def save_png_fast(img_chw_01, out_path):
+    """
+    img_chw_01: float tensor [3,H,W] on CUDA/CPU, values in [0,1].
+    Uses compression_level=0 for speed.
+    """
+    img_u8 = (img_chw_01.clamp(0, 1) * 255.0).to(torch.uint8).cpu()
+    write_png(img_u8, out_path, compression_level=0)
 
+def save_mask_png_fast(mask_hw_u8, out_path):
+    """
+    mask_hw_u8: uint8 tensor [H,W] (0/1). Saves as single-channel PNG.
+    """
+    m = (mask_hw_u8 * 255).to(torch.uint8).unsqueeze(0).cpu()  # [1,H,W]
+    write_png(m, out_path, compression_level=0)
 
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images and masks.")
+    parser = argparse.ArgumentParser(description="Render prototype LEGO parts to images and masks (batched, CUDA-ready).")
     parser.add_argument('--part-ids', type=str,
                         help='Comma-separated list of LDraw IDs to render (e.g. "3001,3020,3626").')
     parser.add_argument('--views_per_obj', type=int, default=20,
-                        help='How many random views to render per part (default=1).')
+                        help='How many views to render per part (default=20).')
     parser.add_argument('--size', type=int, default=330,
                         help='Output image size in pixels (square, default=330).')
     parser.add_argument('--render_scale', type=int, default=4,
-                        help='Supersampling scale factor for rendering (default=3).')
+                        help='Supersampling scale factor for rendering (default=4).')
     parser.add_argument('--device', type=str, default='cpu',
-                        help='Torch device to use (cpu or cuda, default=cpu).')
+                        help='Torch device to use ("cpu" or "cuda", default=cpu).')
     parser.add_argument('--out_dir', type=str, default='viz_outputs/proto',
                         help='Directory to save rendered images and masks.')
+    parser.add_argument('--batch', type=int, default=64,
+                        help='Batch size (number of views rendered at once per mesh).')
     args = parser.parse_args()
 
-    # Determine which parts to render
     selected_ids = args.part_ids.split(',') if args.part_ids else PART_IDS
 
-    # Initialize dataset
+    # Initialize dataset/renderer
     ds = SyntheticBrickProtoDataset(
         obj_dir='objs',
         part_ids=selected_ids,
@@ -210,19 +246,44 @@ if __name__ == '__main__':
     )
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # Number of parts for naming
-    num_parts = len(selected_ids)
+    # Main batched rendering loop: per mesh, render views_per_obj in chunks of args.batch
+    torch.cuda.synchronize() if args.device.startswith('cuda') else None
 
-    # Render and save with partID_viewNumber naming
-    for idx in range(len(ds)):
-        img, meta = ds[idx]
-        mesh_idx = idx % num_parts
-        view_idx = idx // num_parts + 1
-        pid = selected_ids[mesh_idx]
-        img_name = f"{pid}_{view_idx:02d}.png"
-        mask_name = f"{pid}_{view_idx:02d}_mask.png"
-        vutils.save_image(img, os.path.join(args.out_dir, img_name))
-        vutils.save_image(meta['mask'].unsqueeze(0).float(),
-                          os.path.join(args.out_dir, mask_name))
+    for mesh_idx, pid in enumerate(selected_ids):
+        remaining = args.views_per_obj
+        next_view_num = 1
+        while remaining > 0:
+            N = min(args.batch, remaining)
+            # Sample a batch of camera angles on device
+            azim, elev = ds.sample_azim_elev(N)
+            # Render batch for this mesh
+            imgs_bhwc, masks_bhw = ds.render_batch_views(mesh_idx, azim, elev)  # [N,H,W,3], [N,H,W]
 
-    print(f"Rendered {len(ds)} samples to {args.out_dir}")
+            # Post-process and save per sample
+            for i in range(N):
+                # [H,W,3] -> [3,H,W]
+                img_chw = imgs_bhwc[i].permute(2, 0, 1)
+                mask_hw = masks_bhw[i]
+
+                # Composite is already done by renderer background=black; mask keeps consistency
+                # Tight crop -> square -> border (all on device)
+                img_crop, mask_crop = ds._crop_square_with_border(img_chw, mask_hw, border_px=45)
+
+                # Resize to output size (on device)
+                img_out = F.resize(img_crop, [ds.image_size, ds.image_size])
+                mask_out = F.resize(mask_crop.unsqueeze(0).float(),
+                                    [ds.image_size, ds.image_size],
+                                    interpolation=F.InterpolationMode.NEAREST)[0].to(torch.uint8)
+
+                # Save (will move to CPU just-in-time)
+                view_idx = next_view_num + i
+                img_name = f"{pid}_{view_idx:02d}.png"
+                mask_name = f"{pid}_{view_idx:02d}_mask.png"
+                save_png_fast(img_out, os.path.join(args.out_dir, img_name))
+                save_mask_png_fast(mask_out, os.path.join(args.out_dir, mask_name))
+
+            next_view_num += N
+            remaining -= N
+
+    torch.cuda.synchronize() if args.device.startswith('cuda') else None
+    print(f"Rendered {len(selected_ids) * args.views_per_obj} samples to {args.out_dir}")
